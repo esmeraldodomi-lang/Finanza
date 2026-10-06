@@ -14,8 +14,8 @@ if (!m) { console.error('Blocco ANALISI:CORE non trovato in Finanze.html'); proc
 
 const ctx = { console };
 vm.createContext(ctx);
-new vm.Script(m[0] + '\n;this.API = { mesiConDati, previsione, totaleConStima, perCategoria, perQuadrante, dettaglioCategorie, letturaConto };').runInContext(ctx);
-const { mesiConDati, previsione, totaleConStima, perCategoria, perQuadrante, dettaglioCategorie, letturaConto } = ctx.API;
+new vm.Script(m[0] + '\n;this.API = { mesiConDati, previsione, totaleConStima, perCategoria, perQuadrante, dettaglioCategorie, letturaConto, matriceAnno };').runInContext(ctx);
+const { mesiConDati, previsione, totaleConStima, perCategoria, perQuadrante, dettaglioCategorie, letturaConto, matriceAnno } = ctx.API;
 
 let falliti = 0;
 const esito = (ok, testo, extra) => { console.log((ok ? '  OK   ' : '  FAIL ') + testo + (extra !== undefined ? ' — ' + extra : '')); if (!ok) falliti++; };
@@ -133,5 +133,42 @@ console.log('\n9) Lettura del conto');
   esito(l.sotto === 4, 'conta i mesi sotto soglia 500', l.sotto);
 }
 
+console.log('\n10) Matrice Anno (Overview Anno: categorie x mesi, uscite, entrate, risparmi, conto)');
+{
+  const movs = [
+    { cat: 'MUTUO CASA', amount: 800, m: 0 },
+    { cat: 'MUTUO CASA', amount: 800, m: 1 },
+    { cat: 'SPESA', amount: 200, m: 0 },
+    { cat: 'SPESA', amount: 250, m: 1 },
+    { cat: 'SVAGO', amount: 100, m: 0 }
+  ];
+  const rows = Array(12).fill(null).map((_, i) => ({
+    i,
+    entrate: 2000,
+    entrateIn: i === 0 ? 2000 : 0,
+    usciteTot: i === 0 ? 1100 : i === 1 ? 1050 : 0,
+    projectedCC: i === 0 ? 1900 : i === 1 ? 2850 : 2850
+  }));
+  const data = {
+    cats: { 'MUTUO CASA': 'necessaria', 'SPESA': 'necessaria', 'SVAGO': 'vita' },
+    catTipo: { 'MUTUO CASA': 'FISSA', 'SPESA': 'VARIABILE', 'SVAGO': 'VARIABILE' },
+    catDict: ['MUTUO CASA', 'SPESA', 'SVAGO'],
+    ccStart: { 2026: 1000 }
+  };
+  const mat = matriceAnno(movs, rows, data, 2026);
+  esito(mat.categorie.length === 3, 'trovate 3 categorie con spesa', mat.categorie.length);
+  const mutuo = mat.categorie.find(c => c.cat === 'MUTUO CASA');
+  esito(mutuo && vicino(mutuo.tot, 1600), 'MUTUO CASA totale = 1600', mutuo ? mutuo.tot : null);
+  esito(mutuo && mutuo.mesi[0] === 800 && mutuo.mesi[1] === 800, 'MUTUO CASA gen e feb = 800', mutuo ? mutuo.mesi.slice(0, 2).join(',') : null);
+  esito(vicino(mat.usciteMese[0], 1100), 'uscite totali mese 0 (gennaio) = 1100', mat.usciteMese[0]);
+  esito(vicino(mat.usciteMese[1], 1050), 'uscite totali mese 1 (febbraio) = 1050', mat.usciteMese[1]);
+  esito(vicino(mat.entrateMese[0], 2000), 'entrate totali mese 0 = 2000', mat.entrateMese[0]);
+  esito(vicino(mat.risparmiMese[0], 900), 'risparmi mese 0 = 2000 - 1100 = 900', mat.risparmiMese[0]);
+  esito(vicino(mat.risparmiMese[1], 950), 'risparmi mese 1 = 2000 - 1050 = 950', mat.risparmiMese[1]);
+  esito(vicino(mat.saldoContoMese[0], 1900), 'saldo conto gennaio = 1900', mat.saldoContoMese[0]);
+  esito(mat.ccStart === 1000, 'saldo iniziale conto = 1000', mat.ccStart);
+}
+
 console.log('\n' + (falliti ? falliti + ' CONTROLLI FALLITI' : 'TUTTI I CONTROLLI SUPERATI'));
 process.exit(falliti ? 1 : 0);
+

@@ -324,7 +324,7 @@ function App() {
   const [bollette, setBollette] = useState(null);
   const [bolBusy, setBolBusy] = useState("idle");
   const [bolSub, setBolSub] = useState("luce");
-  const [anSub, setAnSub] = useState("uscite");
+  const [anSub, setAnSub] = useState("overview");
   const [risc, setRisc] = useState(null);
   const [riscBusy, setRiscBusy] = useState("idle");
   const [entrate, setEntrate] = useState(null);
@@ -712,7 +712,7 @@ function App() {
       !model || !cur ? React.createElement(NoData, { year: year, data: data, onRetry: riprova }) :
       React.createElement(React.Fragment, null,
         tab === "home" && React.createElement(Home, { model: model, cur: cur, focusM: focusM, setFocusM: setFocusM, year: year, setYear: setYear, anni: anni, data: data, soglia: soglia, annuale: data.annuale && data.annuale[year] || null, onTogglePaid: togglePaid, onBulkPaid: setPaidMany, onEdit: setEditing }),
-        tab === "analisi" && React.createElement(AnalisiHub, { sub: anSub, setSub: setAnSub, model: model, year: year, data: data, soglia: soglia, focusM: focusM, setFocusM: setFocusM, ent: entrate, entBusy: entBusy, onReloadEnt: loadEntrate, onSaveEnt: saveEntrata, onToggleIncassata: toggleIncassata }),
+        tab === "analisi" && React.createElement(AnalisiHub, { sub: anSub, setSub: setAnSub, model: model, year: year, setYear: setYear, anni: anni, data: data, soglia: soglia, focusM: focusM, setFocusM: setFocusM, ent: entrate, entBusy: entBusy, onReloadEnt: loadEntrate, onSaveEnt: saveEntrata, onToggleIncassata: toggleIncassata }),
         tab === "add" && React.createElement(AddExpense, { year: year, model: model, cats: cats, catTipo: catTipo, soglia: soglia, onAdd: addExpense, onAddRicorrente: addRicorrente }),
         tab === "bollette" && React.createElement(React.Fragment, null,
           React.createElement("div", { style: { padding: "8px 18px 0" } }, React.createElement("div", { style: { display: "flex", background: C.panel, borderRadius: 12, padding: 4, border: `1px solid ${C.line}` } }, [["luce", "⚡ Luce", LUCE_C], ["gas", "🔥 Gas", GAS_C], ["riscaldamento", "Riscaldamento", C.ink]].map(([k, t, cc]) => React.createElement("button", { key: k, onClick: () => setBolSub(k), style: { flex: 1, padding: 9, borderRadius: 9, border: "none", cursor: "pointer", fontWeight: 700, fontSize: 12.5, background: bolSub === k ? C.panel2 : "transparent", color: bolSub === k ? cc : C.mut } }, t)))),
@@ -1187,6 +1187,136 @@ function letturaConto(rows, soglia) {
     if (v < 0) negativi++;
   });
   return { min, max, sotto, negativi };
+}
+
+/* Matrice Categorie x 12 Mesi per la vista Overview Anno.
+   Calcola per ogni categoria il totale di ciascun mese (0..11),
+   il totale annuo, la media sui mesi con spesa, e la quota sul totale uscite.
+   Calcola inoltre i totali delle uscite del mese, le entrate del mese,
+   i risparmi del mese, e l'andamento del saldo conto mese per mese. */
+function matriceAnno(movs, rows, data, annoScelto, opz) {
+  var o = opz || {};
+  var filtroNec = o.filtroNec || "tutte";
+  var filtroTipo = o.filtroTipo || "tutte";
+  var search = (o.search || "").trim().toLowerCase();
+  var ordinamento = o.ordinamento || "totDesc";
+  var catsMappa = (data && data.cats) || {};
+  var catTipoMappa = (data && data.catTipo) || {};
+  var catDict = (data && data.catDict) || [];
+
+  var map = {};
+  catDict.forEach(function (c) {
+    if (!c) return;
+    var nec = catsMappa[c] || "vita";
+    var tipo = catTipoMappa[c] || "VARIABILE";
+    map[c] = { cat: c, nec: nec, tipo: tipo, mesi: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], n: 0, tot: 0 };
+  });
+
+  (movs || []).forEach(function (m) {
+    var c = m.cat || "ALTRO";
+    if (!map[c]) {
+      var nec = m.nec || catsMappa[c] || "vita";
+      var tipo = m.tipo || catTipoMappa[c] || "VARIABILE";
+      map[c] = { cat: c, nec: nec, tipo: tipo, mesi: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], n: 0, tot: 0 };
+    }
+    var mese = Number(m.m);
+    if (mese >= 0 && mese < 12) {
+      var amt = Number(m.amount) || 0;
+      map[c].mesi[mese] = Math.round((map[c].mesi[mese] + amt) * 100) / 100;
+      map[c].tot = Math.round((map[c].tot + amt) * 100) / 100;
+      map[c].n++;
+    }
+  });
+
+  var righeList = Object.keys(map).map(function (k) { return map[k]; });
+
+  righeList.forEach(function (r) {
+    var mesiConSpesa = 0;
+    for (var i = 0; i < 12; i++) {
+      if (r.mesi[i] > 0) mesiConSpesa++;
+    }
+    r.mesiConSpesa = mesiConSpesa;
+    r.mediaMese = mesiConSpesa > 0 ? Math.round(r.tot / mesiConSpesa * 100) / 100 : 0;
+    r.mediaAnno = Math.round(r.tot / 12 * 100) / 100;
+  });
+
+  var usciteMese = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+  var entrateMese = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+  var entrateInMese = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+  var risparmiMese = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+  var tassiRisparmioMese = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+  var saldoContoMese = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+  for (var m = 0; m < 12; m++) {
+    var rowM = (rows && rows[m]) ? rows[m] : null;
+    var uM = rowM ? rowM.usciteTot : 0;
+    var eM = rowM ? rowM.entrate : 0;
+    var eInM = rowM ? (rowM.entrateIn || 0) : 0;
+    var ccM = rowM ? rowM.projectedCC : 0;
+
+    if (!uM) {
+      var sumU = 0;
+      for (var j = 0; j < righeList.length; j++) sumU += righeList[j].mesi[m] || 0;
+      uM = Math.round(sumU * 100) / 100;
+    }
+
+    var rispM = Math.round((eM - uM) * 100) / 100;
+    var tassoM = eM > 0 ? Math.round((rispM / eM) * 1000) / 1000 : 0;
+
+    usciteMese[m] = uM;
+    entrateMese[m] = eM;
+    entrateInMese[m] = eInM;
+    risparmiMese[m] = rispM;
+    tassiRisparmioMese[m] = tassoM;
+    saldoContoMese[m] = ccM;
+  }
+
+  var totUsciteAnno = Math.round(usciteMese.reduce(function (a, b) { return a + b; }, 0) * 100) / 100;
+  var totEntrateAnno = Math.round(entrateMese.reduce(function (a, b) { return a + b; }, 0) * 100) / 100;
+  var totRisparmiAnno = Math.round((totEntrateAnno - totUsciteAnno) * 100) / 100;
+  var tassoRisparmioAnno = totEntrateAnno > 0 ? Math.round((totRisparmiAnno / totEntrateAnno) * 1000) / 1000 : 0;
+
+  righeList.forEach(function (r) {
+    r.quota = totUsciteAnno > 0 ? Math.round(r.tot / totUsciteAnno * 1000) / 1000 : 0;
+  });
+
+  var filtrate = righeList.filter(function (r) {
+    if (r.tot <= 0 && (!o.mostraVuote)) return false;
+    if (filtroNec !== "tutte" && r.nec !== filtroNec) return false;
+    if (filtroTipo !== "tutte" && r.tipo !== filtroTipo) return false;
+    if (search && r.cat.toLowerCase().indexOf(search) < 0) return false;
+    return true;
+  });
+
+  filtrate.sort(function (a, b) {
+    if (ordinamento === "totDesc") return b.tot - a.tot;
+    if (ordinamento === "totAsc") return a.tot - b.tot;
+    if (ordinamento === "nome") return a.cat.localeCompare(b.cat);
+    if (ordinamento === "nec") {
+      if (a.nec !== b.nec) return a.nec === "necessaria" ? -1 : 1;
+      return b.tot - a.tot;
+    }
+    return b.tot - a.tot;
+  });
+
+  var ccStart = (data && data.ccStart && data.ccStart[annoScelto] != null) ? data.ccStart[annoScelto] : 0;
+
+  return {
+    categorie: filtrate,
+    totaleCategorie: righeList.length,
+    usciteMese: usciteMese,
+    entrateMese: entrateMese,
+    entrateInMese: entrateInMese,
+    risparmiMese: risparmiMese,
+    tassiRisparmioMese: tassiRisparmioMese,
+    saldoContoMese: saldoContoMese,
+    totUsciteAnno: totUsciteAnno,
+    totEntrateAnno: totEntrateAnno,
+    totRisparmiAnno: totRisparmiAnno,
+    tassoRisparmioAnno: tassoRisparmioAnno,
+    ccStart: ccStart,
+    anno: annoScelto
+  };
 }
 /* ANALISI:CORE:END */
 
@@ -4072,17 +4202,402 @@ function AnalisiConto({ model, year, soglia, focusM, setFocusM }) {
             React.createElement("span", { style: { fontFamily: "ui-monospace, monospace", fontWeight: 700, color: col } }, eurC(v)))))));
 }
 
-function AnalisiHub({ sub, setSub, model, year, data, soglia, focusM, setFocusM, ent, entBusy, onReloadEnt, onSaveEnt, onToggleIncassata }) {
+function ModalMovimentiCella({ cat, mese, year, movs, onClose }) {
+  if (!cat || mese == null) return null;
+  const lista = (movs || []).filter(m => m.cat === cat && Number(m.m) === Number(mese));
+  const tot = lista.reduce((a, m) => a + (Number(m.amount) || 0), 0);
+
+  return React.createElement("div", {
+    onClick: onClose,
+    style: { position: "fixed", inset: 0, zIndex: 70, background: "rgba(5,10,16,.75)", backdropFilter: "blur(3px)", display: "flex", alignItems: "flex-end", justifyContent: "center" }
+  },
+    React.createElement("div", {
+      onClick: e => e.stopPropagation(),
+      style: { width: "100%", maxWidth: 480, background: C.panel, borderTop: `1px solid ${C.line}`, borderRadius: "18px 18px 0 0", padding: "18px 20px calc(24px + env(safe-area-inset-bottom))", maxHeight: "80vh", display: "flex", flexDirection: "column" }
+    },
+      React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 } },
+        React.createElement("div", null,
+          React.createElement("div", { style: { fontSize: 11, letterSpacing: 1.2, color: C.faint, fontWeight: 700 } }, MESI_LONG[mese].toUpperCase(), " ", year),
+          React.createElement("div", { style: { fontSize: 16, fontWeight: 700, color: C.ink, marginTop: 2 } }, cat)),
+        React.createElement("button", { onClick: onClose, style: { background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 10, width: 32, height: 32, color: C.mut, cursor: "pointer", fontSize: 14, fontWeight: 700 } }, "✕")),
+      
+      React.createElement("div", { style: { display: "flex", justifyContent: "space-between", padding: "8px 12px", background: C.panel2, borderRadius: 10, marginBottom: 14 } },
+        React.createElement("span", { style: { fontSize: 12.5, color: C.mut } }, "Totale speso:"),
+        React.createElement("span", { style: { fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 14, color: C.neg } }, eurC(tot))),
+
+      React.createElement("div", { style: { overflowY: "auto", flex: 1, display: "flex", flexDirection: "column", gap: 8 } },
+        lista.length === 0 ? React.createElement("div", { style: { textAlign: "center", color: C.faint, padding: 20, fontSize: 13 } }, "Nessun movimento registrato.")
+        : lista.map((m, idx) => React.createElement("div", { key: m.key || idx, style: { background: C.bg, border: `1px solid ${C.line}`, borderRadius: 10, padding: "10px 12px", display: "flex", justifyContent: "space-between", alignItems: "center" } },
+            React.createElement("div", { style: { flex: 1, minWidth: 0, paddingRight: 8 } },
+              React.createElement("div", { style: { fontSize: 13, color: C.ink, fontWeight: 600 } }, m.note || "Nessuna nota"),
+              React.createElement("div", { style: { fontSize: 11, color: C.faint, marginTop: 2 } },
+                m.dateISO ? m.dateISO : "Mese " + MESI[m.m], " · ",
+                m.cc ? "Carta credito" : "Conto", " · ",
+                m.paid ? "Pagata ✓" : "Da pagare")),
+            React.createElement("div", { style: { fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 14, color: C.ink, textAlign: "right" } }, eurC(m.amount))))),
+
+      React.createElement("button", { onClick: onClose, style: { marginTop: 14, width: "100%", padding: 12, borderRadius: 10, border: `1px solid ${C.line}`, background: C.panel2, color: C.mut, fontWeight: 700, cursor: "pointer", fontSize: 13 } }, "Chiudi")
+    )
+  );
+}
+
+function OverviewAnnoView({ model, year, setYear, anni, data, soglia, focusM, setFocusM }) {
+  const [search, setSearch] = useState("");
+  const [filtroNec, setFiltroNec] = useState("tutte");
+  const [filtroTipo, setFiltroTipo] = useState("tutte");
+  const [ordinamento, setOrdinamento] = useState("totDesc");
+  const [modalCell, setModalCell] = useState(null);
+
+  const mat = useMemo(() => {
+    return matriceAnno(model.movs, model.rows, data, year, {
+      filtroNec: filtroNec,
+      filtroTipo: filtroTipo,
+      search: search,
+      ordinamento: ordinamento,
+      mostraVuote: false
+    });
+  }, [model, year, data, filtroNec, filtroTipo, search, ordinamento]);
+
+  const lConto = useMemo(() => letturaConto(model.rows, soglia), [model.rows, soglia]);
+  const curRow = model.rows[focusM] || model.rows[0];
+
+  return React.createElement("div", { style: { padding: "10px 14px 28px" } },
+    React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 } },
+      React.createElement("div", null,
+        React.createElement("div", { style: { fontSize: 11, letterSpacing: 1.5, color: C.faint, fontWeight: 700 } }, "ANALISI SPESE"),
+        React.createElement("div", { style: { fontSize: 17, fontWeight: 700, color: C.ink, marginTop: 2 } }, "Overview Anno ", year)),
+      anni && anni.length > 1 && React.createElement("div", { style: { display: "flex", gap: 4, background: C.panel, padding: 3, borderRadius: 10, border: `1px solid ${C.line}` } },
+        anni.slice(-4).map(y => React.createElement("button", {
+          key: y,
+          onClick: () => setYear && setYear(y),
+          style: { padding: "5px 10px", borderRadius: 7, border: "none", cursor: "pointer", fontSize: 12, fontWeight: 700, background: y === year ? C.disp : "transparent", color: y === year ? "#08131C" : C.mut }
+        }, y)))),
+
+    React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 14 } },
+      React.createElement(Stat, { lab: "Uscite totali " + year, val: eurC(mat.totUsciteAnno), col: C.neg }),
+      React.createElement(Stat, { lab: "Entrate totali " + year, val: eurC(mat.totEntrateAnno), col: C.disp }),
+      React.createElement(Stat, { lab: "Risparmio netto anno", val: (mat.totRisparmiAnno >= 0 ? "+" : "") + eurC(mat.totRisparmiAnno), col: mat.totRisparmiAnno >= 0 ? C.disp : C.neg }),
+      React.createElement(Stat, { lab: "Tasso risparmio annuo", val: pct(mat.tassoRisparmioAnno), col: mat.tassoRisparmioAnno >= 0.15 ? C.disp : mat.tassoRisparmioAnno >= 0 ? C.amber : C.neg })),
+
+    React.createElement("div", { style: { background: C.panel, border: `1px solid ${C.line}`, borderRadius: 14, padding: "10px 12px", marginBottom: 14 } },
+      React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 8 } },
+        React.createElement("input", {
+          type: "text",
+          value: search,
+          onChange: e => setSearch(e.target.value),
+          placeholder: "🔍 Filtra categorie…",
+          style: { flex: 1, minWidth: 0, background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 9, padding: "8px 12px", color: C.ink, fontSize: 13, outline: "none" }
+        }),
+        search && React.createElement("button", { onClick: () => setSearch(""), style: { padding: "0 10px", borderRadius: 9, border: `1px solid ${C.line}`, background: C.panel2, color: C.mut, cursor: "pointer" } }, "✕")),
+      
+      React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" } },
+        React.createElement("div", { style: { display: "flex", gap: 3, background: C.panel2, padding: 2, borderRadius: 8 } },
+          [["tutte", "Tutte"], ["necessaria", "Necessarie"], ["vita", "Vita"]].map(([k, t]) => React.createElement("button", {
+            key: k,
+            onClick: () => setFiltroNec(k),
+            style: { padding: "4px 8px", borderRadius: 6, border: "none", cursor: "pointer", fontSize: 11, fontWeight: 600, background: filtroNec === k ? (k === "necessaria" ? NEC.necessaria.c : k === "vita" ? NEC.vita.c : C.line) : "transparent", color: filtroNec === k ? "#fff" : C.mut }
+          }, t))),
+        React.createElement("div", { style: { display: "flex", gap: 3, background: C.panel2, padding: 2, borderRadius: 8 } },
+          [["tutte", "Tutti"], ["FISSA", "Fisse"], ["VARIABILE", "Variabili"]].map(([k, t]) => React.createElement("button", {
+            key: k,
+            onClick: () => setFiltroTipo(k),
+            style: { padding: "4px 8px", borderRadius: 6, border: "none", cursor: "pointer", fontSize: 11, fontWeight: 600, background: filtroTipo === k ? (k === "FISSA" ? TIPOL.FISSA.c : k === "VARIABILE" ? TIPOL.VARIABILE.c : C.line) : "transparent", color: filtroTipo === k ? "#fff" : C.mut }
+          }, t))),
+        React.createElement("div", { style: { marginLeft: "auto", display: "flex", gap: 4, alignItems: "center" } },
+          React.createElement("span", { style: { fontSize: 10, color: C.faint } }, "Ordina:"),
+          React.createElement("select", {
+            value: ordinamento,
+            onChange: e => setOrdinamento(e.target.value),
+            style: { background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 8, color: C.ink, fontSize: 11, padding: "4px 6px" }
+          },
+            React.createElement("option", { value: "totDesc" }, "Totale ↓"),
+            React.createElement("option", { value: "totAsc" }, "Totale ↑"),
+            React.createElement("option", { value: "nome" }, "Nome A-Z"),
+            React.createElement("option", { value: "nec" }, "Necessità"))))),
+
+    /* =========================================================
+       TABELLA MATRICE CATEGORIE × 12 MESI + RIGHE TOTALI
+       ========================================================= */
+    React.createElement("div", { style: { background: C.panel, border: `1px solid ${C.line}`, borderRadius: 14, overflow: "hidden", marginBottom: 18 } },
+      React.createElement("div", { style: { padding: "10px 14px 8px", borderBottom: `1px solid ${C.line}`, display: "flex", justifyContent: "space-between", alignItems: "center" } },
+        React.createElement("div", { style: { fontSize: 11, fontWeight: 700, letterSpacing: 1, color: C.faint } }, "MATRICE CATEGORIE × MESI · ", year),
+        React.createElement("div", { style: { fontSize: 11, color: C.mut } }, mat.categorie.length, " categorie")),
+
+      React.createElement("div", { style: { overflowX: "auto", overscrollBehaviorX: "contain", WebkitOverflowScrolling: "touch" } },
+        React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", minWidth: 840, fontSize: 11.5 } },
+          React.createElement("thead", null,
+            React.createElement("tr", { style: { background: C.panel2, borderBottom: `1px solid ${C.line}`, color: C.mut } },
+              React.createElement("th", { style: { position: "sticky", left: 0, zIndex: 3, background: C.panel2, textAlign: "left", padding: "10px 12px", minWidth: 150, fontWeight: 700 } }, "CATEGORIA"),
+              MESI.map((m, idx) => React.createElement("th", {
+                key: m,
+                onClick: () => setFocusM && setFocusM(idx),
+                style: { width: 54, textAlign: "right", padding: "10px 6px", cursor: "pointer", fontWeight: 700, color: idx === focusM ? C.disp : C.mut, background: idx === focusM ? "rgba(55,214,160,.08)" : "transparent" }
+              }, m)),
+              React.createElement("th", { style: { width: 68, textAlign: "right", padding: "10px 8px", fontWeight: 700, color: C.ink } }, "TOTALE"),
+              React.createElement("th", { style: { width: 58, textAlign: "right", padding: "10px 8px", fontWeight: 700, color: C.mut } }, "MEDIA"))),
+
+          React.createElement("tbody", null,
+            mat.categorie.length === 0 ? React.createElement("tr", null,
+              React.createElement("td", { colSpan: 15, style: { textAlign: "center", padding: 24, color: C.faint } }, "Nessuna categoria corrispondente ai filtri."))
+            : mat.categorie.map(r => {
+                const necCol = necMeta(r.nec).c;
+                return React.createElement("tr", {
+                  key: r.cat,
+                  style: { borderBottom: `1px solid rgba(39,56,75,.45)` }
+                },
+                  React.createElement("td", {
+                    style: { position: "sticky", left: 0, zIndex: 2, background: C.panel, padding: "8px 12px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 170 }
+                  },
+                    React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6 } },
+                      React.createElement("span", { style: { width: 7, height: 7, borderRadius: 2, background: necCol, flex: "0 0 auto" } }),
+                      React.createElement("span", { style: { fontWeight: 600, color: C.ink, overflow: "hidden", textOverflow: "ellipsis" }, title: r.cat }, r.cat))),
+
+                  r.mesi.map((v, mIdx) => React.createElement("td", {
+                    key: mIdx,
+                    onClick: () => v > 0 && setModalCell({ cat: r.cat, mese: mIdx }),
+                    style: {
+                      textAlign: "right",
+                      padding: "8px 6px",
+                      fontFamily: "ui-monospace, monospace",
+                      cursor: v > 0 ? "pointer" : "default",
+                      color: v > 0 ? (mIdx === focusM ? C.ink : "#D2DDE7") : C.faint,
+                      fontWeight: v > 0 ? 600 : 400,
+                      background: mIdx === focusM ? "rgba(55,214,160,.04)" : "transparent"
+                    },
+                    title: v > 0 ? `Tocca per dettagli ${r.cat} (${MESI[mIdx]})` : ""
+                  }, v > 0 ? Math.round(v) : "—")),
+
+                  React.createElement("td", {
+                    style: { textAlign: "right", padding: "8px 8px", fontFamily: "ui-monospace, monospace", fontWeight: 700, color: C.ink }
+                  }, Math.round(r.tot)),
+
+                  React.createElement("td", {
+                    style: { textAlign: "right", padding: "8px 8px", fontFamily: "ui-monospace, monospace", color: C.mut }
+                  }, Math.round(r.mediaMese))
+                );
+              })),
+
+          React.createElement("tfoot", null,
+            /* 1) USCITE TOTALI DEL MESE */
+            React.createElement("tr", {
+              style: { background: "rgba(242,114,109,.10)", borderTop: `2px solid ${C.neg}`, color: C.neg }
+            },
+              React.createElement("td", {
+                style: { position: "sticky", left: 0, zIndex: 2, background: "#1F1A22", padding: "10px 12px", fontWeight: 800, letterSpacing: .5 }
+              }, "▼ USCITE TOTALI"),
+              mat.usciteMese.map((u, idx) => React.createElement("td", {
+                key: idx,
+                onClick: () => setFocusM && setFocusM(idx),
+                style: { textAlign: "right", padding: "10px 6px", fontFamily: "ui-monospace, monospace", fontWeight: 700, cursor: "pointer", background: idx === focusM ? "rgba(242,114,109,.18)" : "transparent" }
+              }, Math.round(u))),
+              React.createElement("td", { style: { textAlign: "right", padding: "10px 8px", fontFamily: "ui-monospace, monospace", fontWeight: 800 } }, Math.round(mat.totUsciteAnno)),
+              React.createElement("td", { style: { textAlign: "right", padding: "10px 8px", fontFamily: "ui-monospace, monospace", fontWeight: 700 } }, Math.round(mat.totUsciteAnno / 12))),
+
+            /* 2) ENTRATE TOTALI DEL MESE */
+            React.createElement("tr", {
+              style: { background: "rgba(55,214,160,.08)", borderTop: `1px solid ${C.line}`, color: C.disp }
+            },
+              React.createElement("td", {
+                style: { position: "sticky", left: 0, zIndex: 2, background: "#132322", padding: "10px 12px", fontWeight: 800, letterSpacing: .5 }
+              }, "▲ ENTRATE TOTALI"),
+              mat.entrateMese.map((e, idx) => React.createElement("td", {
+                key: idx,
+                onClick: () => setFocusM && setFocusM(idx),
+                style: { textAlign: "right", padding: "10px 6px", fontFamily: "ui-monospace, monospace", fontWeight: 700, cursor: "pointer", background: idx === focusM ? "rgba(55,214,160,.18)" : "transparent" }
+              }, Math.round(e))),
+              React.createElement("td", { style: { textAlign: "right", padding: "10px 8px", fontFamily: "ui-monospace, monospace", fontWeight: 800 } }, Math.round(mat.totEntrateAnno)),
+              React.createElement("td", { style: { textAlign: "right", padding: "10px 8px", fontFamily: "ui-monospace, monospace", fontWeight: 700 } }, Math.round(mat.totEntrateAnno / 12))),
+
+            /* 3) RISPARMI DEL MESE */
+            React.createElement("tr", {
+              style: { background: C.panel2, borderTop: `1px solid ${C.line}`, borderBottom: `2px solid ${C.line}` }
+            },
+              React.createElement("td", {
+                style: { position: "sticky", left: 0, zIndex: 2, background: C.panel2, padding: "10px 12px", fontWeight: 800, letterSpacing: .5, color: C.ink }
+              }, "◆ RISPARMI MESE"),
+              mat.risparmiMese.map((r, idx) => React.createElement("td", {
+                key: idx,
+                onClick: () => setFocusM && setFocusM(idx),
+                style: {
+                  textAlign: "right",
+                  padding: "10px 6px",
+                  fontFamily: "ui-monospace, monospace",
+                  fontWeight: 800,
+                  cursor: "pointer",
+                  color: r >= 0 ? C.disp : C.neg,
+                  background: idx === focusM ? "rgba(255,255,255,.05)" : "transparent"
+                }
+              },
+                r >= 0 ? "+" + Math.round(r) : "−" + Math.round(Math.abs(r)))),
+              React.createElement("td", {
+                style: { textAlign: "right", padding: "10px 8px", fontFamily: "ui-monospace, monospace", fontWeight: 800, color: mat.totRisparmiAnno >= 0 ? C.disp : C.neg }
+              }, mat.totRisparmiAnno >= 0 ? "+" + Math.round(mat.totRisparmiAnno) : "−" + Math.round(Math.abs(mat.totRisparmiAnno))),
+              React.createElement("td", {
+                style: { textAlign: "right", padding: "10px 8px", fontFamily: "ui-monospace, monospace", fontWeight: 700, color: mat.tassoRisparmioAnno >= 0 ? C.disp : C.neg }
+              }, pct(mat.tassoRisparmioAnno)))
+          )
+        )
+      ),
+
+      React.createElement("div", { style: { padding: "8px 14px", fontSize: 11, color: C.faint, display: "flex", justifyContent: "space-between", alignItems: "center" } },
+        React.createElement("span", null, "💡 Tocca una cella con importo per vedere tutti i singoli movimenti."),
+        React.createElement("span", null, "Tocca il mese per sincronizzare col grafico."))
+    ),
+
+    /* =========================================================
+       GRAFICO ANDAMENTO DEL CONTO CORRENTE (SOTTO LA TABELLA)
+       ========================================================= */
+    React.createElement("div", { style: { background: C.panel, border: `1px solid ${C.line}`, borderRadius: 16, padding: 16 } },
+      React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 } },
+        React.createElement("div", null,
+          React.createElement("div", { style: { fontSize: 11, letterSpacing: 1.5, color: C.faint, fontWeight: 600 } }, "ANDAMENTO CONTO CORRENTE · ", year),
+          React.createElement("div", { style: { fontSize: 14, fontWeight: 700, color: C.ink, marginTop: 2 } }, "Traiettoria del Saldo Mese per Mese")),
+        React.createElement("div", { style: { textAlign: "right" } },
+          React.createElement("div", { style: { fontSize: 10, color: C.faint } }, "Saldo inizio anno:"),
+          React.createElement("div", { style: { fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 12.5, color: C.ink } }, eurC(mat.ccStart)))),
+
+      React.createElement(GraficoConto, { rows: model.rows, soglia: soglia, focusM: focusM, onPick: setFocusM }),
+
+      curRow && React.createElement("div", { style: { marginTop: 14, background: C.panel2, borderRadius: 12, padding: "12px 14px", border: `1px solid ${C.line}` } },
+        React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 } },
+          React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: C.ink } },
+            "Dettaglio ", MESI_LONG[focusM], " ", year),
+          React.createElement("div", { style: { fontSize: 11, color: curRow.projectedCC >= soglia ? C.disp : curRow.projectedCC >= 0 ? C.amber : C.neg, fontWeight: 700 } },
+            curRow.projectedCC >= soglia ? "Sopra soglia di sicurezza" : curRow.projectedCC >= 0 ? "Sotto soglia (" + soglia + " €)" : "⚠ SOTTO ZERO")),
+        React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6, textAlign: "center" } },
+          React.createElement("div", { style: { background: C.bg, padding: "6px 4px", borderRadius: 8 } },
+            React.createElement("div", { style: { fontSize: 9.5, color: C.faint } }, "ENTRATE"),
+            React.createElement("div", { style: { fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 12, color: C.disp, marginTop: 2 } }, Math.round(curRow.entrate))),
+          React.createElement("div", { style: { background: C.bg, padding: "6px 4px", borderRadius: 8 } },
+            React.createElement("div", { style: { fontSize: 9.5, color: C.faint } }, "USCITE"),
+            React.createElement("div", { style: { fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 12, color: C.neg, marginTop: 2 } }, Math.round(curRow.usciteTot))),
+          React.createElement("div", { style: { background: C.bg, padding: "6px 4px", borderRadius: 8 } },
+            React.createElement("div", { style: { fontSize: 9.5, color: C.faint } }, "RISPARMIO"),
+            React.createElement("div", { style: { fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 12, color: (curRow.entrate - curRow.usciteTot) >= 0 ? C.disp : C.neg, marginTop: 2 } },
+              Math.round(curRow.entrate - curRow.usciteTot))),
+          React.createElement("div", { style: { background: C.bg, padding: "6px 4px", borderRadius: 8 } },
+            React.createElement("div", { style: { fontSize: 9.5, color: C.faint } }, "SALDO FINE"),
+            React.createElement("div", { style: { fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 12, color: curRow.projectedCC >= 0 ? C.ink : C.neg, marginTop: 2 } },
+              Math.round(curRow.projectedCC))))),
+
+      React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginTop: 12 } },
+        React.createElement("div", { style: { background: C.panel2, borderRadius: 10, padding: "8px 10px", border: `1px solid ${C.line}` } },
+          React.createElement("div", { style: { fontSize: 9.5, color: C.faint } }, "PUNTO PIÙ BASSO"),
+          React.createElement("div", { style: { fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 12, color: lConto.min && lConto.min.v < 0 ? C.neg : C.ink, marginTop: 2 } },
+            lConto.min ? MESI[lConto.min.i] + " (" + Math.round(lConto.min.v) + " €)" : "—")),
+        React.createElement("div", { style: { background: C.panel2, borderRadius: 10, padding: "8px 10px", border: `1px solid ${C.line}` } },
+          React.createElement("div", { style: { fontSize: 9.5, color: C.faint } }, "PUNTO PIÙ ALTO"),
+          React.createElement("div", { style: { fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 12, color: C.disp, marginTop: 2 } },
+            lConto.max ? MESI[lConto.max.i] + " (" + Math.round(lConto.max.v) + " €)" : "—")),
+        React.createElement("div", { style: { background: C.panel2, borderRadius: 10, padding: "8px 10px", border: `1px solid ${C.line}` } },
+          React.createElement("div", { style: { fontSize: 9.5, color: C.faint } }, "SOTTO SOGLIA"),
+          React.createElement("div", { style: { fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 12, color: lConto.sotto > 0 ? C.amber : C.disp, marginTop: 2 } },
+            lConto.sotto + " mesi su 12")))
+    ),
+
+    modalCell && React.createElement(ModalMovimentiCella, {
+      cat: modalCell.cat,
+      mese: modalCell.mese,
+      year: year,
+      movs: model.movs,
+      onClose: () => setModalCell(null)
+    })
+  );
+}
+
+function AnalisiConfrontoAnni({ data, currentYear, onSelectYear }) {
+  const anni = (data && data.anni) || [currentYear];
+  const confronto = useMemo(() => {
+    return anni.map(y => {
+      const b = data && data.base && data.base[y];
+      if (!b) return { anno: y, uscite: 0, entrate: 0, risparmio: 0, tasso: 0 };
+      const entrateTot = (b.entrate || []).reduce((a, v) => a + (Number(v) || 0), 0);
+      const necFisso = (b.necFisso || []).reduce((a, v) => a + (Number(v) || 0), 0);
+      const necVar = (b.necVar || []).reduce((a, v) => a + (Number(v) || 0), 0);
+      const vitaFisso = (b.vitaFisso || []).reduce((a, v) => a + (Number(v) || 0), 0);
+      const vitaVar = (b.vitaVar || []).reduce((a, v) => a + (Number(v) || 0), 0);
+      const usciteTot = necFisso + necVar + vitaFisso + vitaVar;
+      const risp = entrateTot - usciteTot;
+      const tasso = entrateTot > 0 ? risp / entrateTot : 0;
+      return {
+        anno: y,
+        uscite: Math.round(usciteTot * 100) / 100,
+        entrate: Math.round(entrateTot * 100) / 100,
+        risparmio: Math.round(risp * 100) / 100,
+        tasso: tasso
+      };
+    });
+  }, [data, anni]);
+
+  return React.createElement("div", { style: { padding: "10px 18px" } },
+    React.createElement("div", { style: { fontSize: 11, letterSpacing: 1.5, color: C.faint, fontWeight: 600 } }, "CONFRONTO MULTI-ANNO"),
+    React.createElement("div", { style: { fontSize: 16, fontWeight: 700, color: C.ink, marginTop: 2, marginBottom: 14 } }, "Trend Storico Anno per Anno"),
+    
+    React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 10 } },
+      confronto.map(c => React.createElement("div", {
+        key: c.anno,
+        onClick: () => onSelectYear && onSelectYear(c.anno),
+        style: {
+          background: c.anno === currentYear ? C.panel2 : C.panel,
+          border: `1px solid ${c.anno === currentYear ? C.disp : C.line}`,
+          borderRadius: 14,
+          padding: "14px 16px",
+          cursor: "pointer"
+        }
+      },
+        React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 } },
+          React.createElement("div", { style: { fontSize: 16, fontWeight: 700, color: c.anno === currentYear ? C.disp : C.ink } }, c.anno, c.anno === currentYear ? " (Attivo)" : ""),
+          React.createElement("div", { style: { fontSize: 12, color: c.risparmio >= 0 ? C.disp : C.neg, fontWeight: 700, fontFamily: "ui-monospace, monospace" } },
+            (c.risparmio >= 0 ? "+" : "") + eurC(c.risparmio), " (", pct(c.tasso), ")")),
+        React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 } },
+          React.createElement("div", null,
+            React.createElement("span", { style: { fontSize: 11, color: C.mut } }, "Uscite: "),
+            React.createElement("b", { style: { fontFamily: "ui-monospace, monospace", color: C.neg } }, eurC(c.uscite))),
+          React.createElement("div", null,
+            React.createElement("span", { style: { fontSize: 11, color: C.mut } }, "Entrate: "),
+            React.createElement("b", { style: { fontFamily: "ui-monospace, monospace", color: C.disp } }, eurC(c.entrate))))
+      )))
+  );
+}
+
+function AnalisiHub({ sub, setSub, model, year, setYear, anni, data, soglia, focusM, setFocusM, ent, entBusy, onReloadEnt, onSaveEnt, onToggleIncassata }) {
+  const tabs = [
+    ["overview", "Overview Anno", "#37D6A0"],
+    ["uscite", "Uscite", C.neg],
+    ["entrate", "Entrate", C.disp],
+    ["conto", "Conto", "#5B84C4"],
+    ["confronto", "Confronto Anni", "#E9B84A"]
+  ];
+
   return React.createElement(React.Fragment, null,
-    React.createElement("div", { style: { padding: "8px 18px 0" } },
-      React.createElement("div", { style: { display: "flex", background: C.panel, borderRadius: 12, padding: 4, border: `1px solid ${C.line}` } },
-        [["uscite", "Uscite", C.neg], ["entrate", "Entrate", C.disp], ["conto", "Conto", "#5B84C4"]].map(([k, t, cc]) =>
-          React.createElement("button", { key: k, onClick: () => setSub(k), style: { flex: 1, padding: 11, borderRadius: 9, border: "none", cursor: "pointer", fontWeight: 700, fontSize: 13, background: sub === k ? C.panel2 : "transparent", color: sub === k ? cc : C.mut } }, t)))),
-    sub === "uscite" ? React.createElement(AnalisiUscite, { model: model, year: year, data: data })
+    React.createElement("div", { style: { padding: "8px 14px 0" } },
+      React.createElement("div", { style: { display: "flex", background: C.panel, borderRadius: 12, padding: 3, border: `1px solid ${C.line}`, overflowX: "auto", overscrollBehaviorX: "contain" } },
+        tabs.map(([k, t, cc]) =>
+          React.createElement("button", {
+            key: k,
+            onClick: () => setSub(k),
+            style: {
+              flex: "1 0 auto",
+              padding: "9px 12px",
+              borderRadius: 9,
+              border: "none",
+              cursor: "pointer",
+              fontWeight: 700,
+              fontSize: 12,
+              whiteSpace: "nowrap",
+              background: sub === k ? C.panel2 : "transparent",
+              color: sub === k ? cc : C.mut
+            }
+          }, t)))),
+
+    sub === "overview" ? React.createElement(OverviewAnnoView, { model: model, year: year, setYear: setYear, anni: anni, data: data, soglia: soglia, focusM: focusM, setFocusM: setFocusM })
+      : sub === "uscite" ? React.createElement(AnalisiUscite, { model: model, year: year, data: data })
       : sub === "conto" ? React.createElement(AnalisiConto, { model: model, year: year, soglia: soglia, focusM: focusM, setFocusM: setFocusM })
+      : sub === "confronto" ? React.createElement(AnalisiConfrontoAnni, { data: data, currentYear: year, onSelectYear: y => { if (setYear) setYear(y); setSub("overview"); } })
       : React.createElement(React.Fragment, null,
         React.createElement(AnalisiEntrate, { model: model, year: year }),
-        React.createElement(EntratePage, { ent: ent, busy: entBusy, onReload: onReloadEnt, onSave: onSaveEnt, onToggleIncassata: onToggleIncassata })));
+        React.createElement(EntratePage, { ent: ent, busy: entBusy, onReload: onReloadEnt, onSave: onSaveEnt, onToggleIncassata: onToggleIncassata }))
+  );
 }
 
 
@@ -5052,8 +5567,8 @@ function TabBar({ tab, setTab }) {
      `position:fixed`, quindi il taglio non produce nemmeno uno scorrimento
      che lo denunci. A 9,5px la fila sta in 291px e ci sta anche sui
      telefoni piccoli. */
-  const items = [["home", "Panoramica", "▤"], ["analisi", "Analisi", "◵"], ["add", "Aggiungi", "＋"], ["ia", "Chiedi", "✦"], ["bollette", "Bollette", "⚡"], ["list", "Movimenti", "≣"]];
-  return React.createElement("div", { style: { position: "fixed", bottom: 0, left: 0, right: 0, background: "rgba(14,22,32,.92)", backdropFilter: "blur(8px)", borderTop: `1px solid ${C.line}` } }, React.createElement("div", { style: { maxWidth: 480, margin: "0 auto", display: "flex" } }, items.map(([k, t, ic]) => React.createElement("button", { key: k, onClick: () => setTab(k), style: { flex: 1, background: "none", border: "none", cursor: "pointer", padding: "12px 0 16px", color: tab === k ? C.disp : C.mut, display: "flex", flexDirection: "column", alignItems: "center", gap: 3 } }, React.createElement("span", { style: { fontSize: 20, lineHeight: 1 } }, ic), React.createElement("span", { style: { fontSize: 9.5, fontWeight: 600, letterSpacing: .2, whiteSpace: "nowrap" } }, t)))));
+  const items = [["home", "Panoramica", "▤"], ["analisi", "Analisi Spese", "◵"], ["add", "Aggiungi", "＋"], ["ia", "Chiedi", "✦"], ["bollette", "Bollette", "⚡"], ["list", "Movimenti", "≣"]];
+  return React.createElement("div", { style: { position: "fixed", bottom: 0, left: 0, right: 0, background: "rgba(14,22,32,.92)", backdropFilter: "blur(8px)", borderTop: `1px solid ${C.line}` } }, React.createElement("div", { style: { maxWidth: 480, margin: "0 auto", display: "flex" } }, items.map(([k, t, ic]) => React.createElement("button", { key: k, onClick: () => setTab(k), style: { flex: 1, background: "none", border: "none", cursor: "pointer", padding: "12px 0 16px", color: tab === k ? C.disp : C.mut, display: "flex", flexDirection: "column", alignItems: "center", gap: 3 } }, React.createElement("span", { style: { fontSize: 20, lineHeight: 1 } }, ic), React.createElement("span", { style: { fontSize: 8.5, fontWeight: 600, letterSpacing: .1, whiteSpace: "nowrap" } }, t)))));
 }
 
 try {
