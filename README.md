@@ -8,7 +8,7 @@
 ## 1. STRUTTURA DEL PROGETTO
 
 ```text
-finanze/
+Finanza/  (radice della repo)
 ├── Finanze.html             # Client frontend (React 18 senza JSX, React.createElement)
 ├── FINANZE.gs               # Backend Google Apps Script (lettura fogli, salvataggio spese)
 ├── IA_FINANZE.md            # Documentazione del motore assistente IA locale e cloud
@@ -49,23 +49,23 @@ Tutti i test girano in Node.js senza dipendenze esterne:
 
 ```bash
 # 1. Controllo compatibilità sintassi Safari/iOS (nessuna sintassi post-ES2018)
-node finanze/check_babel.js
+node check_babel.js
 
 # 2. Test del motore delle analisi (ANALISI:CORE inclusa matriceAnno)
-node finanze/smoke_analisi.js
+node smoke_analisi.js
 
 # 3. Test colonne e tolleranza dati da foglio
-node finanze/smoke_colonne.js
+node smoke_colonne.js
 
 # 4. Test del parser bollette
-node finanze/smoke_bollette.js
+node smoke_bollette.js
 
 # 5. Test del backend e generazione payload
-node finanze/smoke_server.js
+node smoke_server.js
 
 # 6. Test assistente IA (motore locale e backend)
-node finanze/smoke_ia.js
-node finanze/smoke_ia_backend.js
+node smoke_ia.js
+node smoke_ia_backend.js
 ```
 
 ---

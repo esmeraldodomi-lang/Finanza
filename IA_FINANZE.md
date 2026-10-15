@@ -1,6 +1,6 @@
 # ASSISTENTE IA — GESTIONE FINANZIARIA
 
-> Scheda **Chiedi** dell'app `finanze/`. Si chiede, si analizza e **si agisce**
+> Scheda **Chiedi** dell'app Finanza. Si chiede, si analizza e **si agisce**
 > — a voce o scrivendo, in italiano parlato. L'assistente arriva dove arriva
 > l'app: registrare, spuntare, correggere, eliminare, riclassificare.
 
@@ -429,13 +429,13 @@ finito.
 ## 8. COME È FATTO
 
 ```
-finanze/Finanze.html
+Finanze.html
   ANALISI:CORE   previsioni, categorie, quadranti, lettura del conto
   IA:CORE        interprete italiano, indice, 15 strumenti, proposte,
                  motore locale, prompt      ← senza JSX e senza React
   ChatFin / PropostaCard / AzioneCard / IaConfig / FinTesto / FinTabella
                  interfaccia (componenti top-level fuori da App)
-finanze/FINANZE.gs
+FINANZE.gs
   chiediIA()     ponte neutro verso il provider; NON esegue strumenti;
                  marca la cache del prefisso e riporta i token risparmiati
   statoIA() modelliIA() impostaModelloIA() impostaPreferenzaIA() testIA()
@@ -541,16 +541,16 @@ finanze/FINANZE.gs
 ## 10. VERIFICHE
 
 ```bash
-node finanze/check_babel.js          # sintassi + compatibilità Safari + guardie
-node finanze/smoke_ia.js             # motore: interprete, strumenti, proposte, azioni,
+node check_babel.js          # sintassi + compatibilità Safari + guardie
+node smoke_ia.js             # motore: interprete, strumenti, proposte, azioni,
                                      # elenco conversazioni, e il confronto con i VERI
                                      # salvaSpesa/salvaRicorrente
-node finanze/smoke_ia_backend.js     # ponte verso i provider e cache del prefisso, senza rete
-node finanze/smoke_ia_pagina.js      # chat montata in jsdom: niente scrive senza il pulsante,
+node smoke_ia_backend.js     # ponte verso i provider e cache del prefisso, senza rete
+node smoke_ia_pagina.js      # chat montata in jsdom: niente scrive senza il pulsante,
                                      # le conversazioni non si cancellano, FERMA ferma davvero,
                                      # copia/rigenera/modifica
-node finanze/smoke_boot.js           # l'app parte ancora
-node finanze/smoke_analisi.js finanze/smoke_server.js finanze/smoke_colonne.js finanze/smoke_bollette.js
+node smoke_boot.js           # l'app parte ancora
+node smoke_analisi.js smoke_server.js smoke_colonne.js smoke_bollette.js
 ```
 
 Dipendenze dei collaudi in pagina, da installare **in un solo comando**

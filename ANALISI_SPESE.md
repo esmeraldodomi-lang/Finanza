@@ -1,6 +1,6 @@
 # SPECIFICA E GUIDA — ANALISI SPESE (OVERVIEW ANNO)
 
-> Documentazione ufficiale della funzione **Analisi Spese** dell'app `finanze/`.
+> Documentazione ufficiale della funzione **Analisi Spese** dell'app Finanza.
 
 ---
 
@@ -95,4 +95,4 @@ Oltre a "Overview Anno", la barra superiore permette di passare ad altre analisi
 
 La funzione pura JavaScript `matriceAnno(movs, rows, data, annoScelto, opz)` risiede nel blocco protetto `/* ANALISI:CORE:START */` di `Finanze.html`:
 - È priva di JSX ed estraibile per test automatici Node.js.
-- Coperta da test dedicati in `finanze/smoke_analisi.js` (Test #10: verifica quadratura colonne, totali uscite, entrate, risparmi, saldi conto e saldo iniziale).
+- Coperta da test dedicati in `smoke_analisi.js` (Test #10: verifica quadratura colonne, totali uscite, entrate, risparmi, saldi conto e saldo iniziale).
