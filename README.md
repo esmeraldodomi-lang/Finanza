@@ -13,9 +13,11 @@ Finanza/  (radice della repo)
 ├── FINANZE.gs               # Backend Google Apps Script (lettura fogli, salvataggio spese)
 ├── IA_FINANZE.md            # Documentazione del motore assistente IA locale e cloud
 ├── ANALISI_SPESE.md         # Documentazione della funzione "Analisi Spese" (Overview Anno)
+├── AUTO.md                  # Modulo Auto: manutenzione, scadenze, costi, promemoria email/Calendar
 ├── package.json             # Configurazione runtime per gli script di collaudo Node
 ├── check_babel.js           # Verifica compatibilità sintattica iOS / Safari
 ├── smoke_analisi.js         # Test unitari sul motore di calcolo (ANALISI:CORE)
+├── smoke_auto.js            # Modulo Auto: motore (AUTO:CORE), backend e pagina
 ├── smoke_server.js          # Collaudo di buildFinanze_() e ponte Google Sheets
 ├── smoke_colonne.js         # Verifica intestazioni colonne e tolleranza dati reali
 ├── smoke_bollette.js        # Test parser bollette luce e gas
@@ -38,8 +40,9 @@ Finanza/  (radice della repo)
 3. **Aggiungi (`add`)**: Registrazione singola spesa o piano rate ricorrenti.
 4. **Chiedi (`ia`)**: Assistente IA contabile (funziona sia con motore locale a costo zero, sia con modelli Gemini/Claude).
 5. **Bollette (`bollette`)**: Analisi consumi e costi Luce, Gas e Riscaldamento, con caricamento e analisi PDF.
-6. **Movimenti (`list`)**: Registro storico di tutte le transazioni con filtri multi-anno, ordinamento e ricerca.
-7. **Impostazioni (`impostazioni`)**: Configurazione della classificazione categorie (Necessaria / Vita).
+6. **Auto (`auto`)**: Cruscotto scadenze (RCA, bollo, revisione, catene, tagliando), storico interventi, piano di manutenzione dal computer di bordo, costi da USCITE con controlli di coerenza, promemoria via email e Google Calendar. Vedi `AUTO.md`.
+7. **Movimenti (`list`)**: Registro storico di tutte le transazioni con filtri multi-anno, ordinamento e ricerca.
+8. **Impostazioni (`impostazioni`)**: Configurazione della classificazione categorie (Necessaria / Vita).
 
 ---
 
@@ -63,7 +66,10 @@ node smoke_bollette.js
 # 5. Test del backend e generazione payload
 node smoke_server.js
 
-# 6. Test assistente IA (motore locale e backend)
+# 6. Test modulo Auto (motore, backend, pagina)
+node smoke_auto.js
+
+# 7. Test assistente IA (motore locale e backend)
 node smoke_ia.js
 node smoke_ia_backend.js
 ```
