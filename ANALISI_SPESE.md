@@ -6,7 +6,7 @@
 
 ## 1. OBIETTIVO E PANORAMICA
 
-La sezione **Analisi Spese** (`tab: "analisi"`) fornisce una suite completa di analisi finanziaria basata sui dati storici e previsionali dell'archivio Google Sheets / database locale.
+La sezione **Analisi Spese** (`tab: "analisi"`, nella barra in basso etichettata "Analisi" dall'arrivo del tab Auto) fornisce una suite completa di analisi finanziaria basata sui dati storici e previsionali dell'archivio Google Sheets / database locale.
 
 Il fulcro della sezione è la vista **Overview Anno**, che sintetizza l'intero anno in una matrice a griglia interattiva, seguita dalle righe di chiusura e dal grafico temporale del conto corrente.
 

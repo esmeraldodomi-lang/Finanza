@@ -1,6 +1,6 @@
 # GESTIONE FINANZIARIA PERSONALE
 
-> Applicazione per la gestione finanziaria, bilancio familiare, analisi spese, monitoraggio bollette e assistente contabile.
+> Applicazione per la gestione finanziaria, bilancio familiare, analisi spese, monitoraggio bollette, manutenzione dell'auto e assistente contabile.
 > Distribuita come Single Page Application standalone su Google Apps Script (GAS) ed eseguibile nel runtime locale su porta 3000.
 
 ---
@@ -31,7 +31,7 @@ Finanza/  (radice della repo)
 ## 2. MODULI DELL'APPLICAZIONE
 
 1. **Panoramica (`home`)**: Cruscotto mensile, saldo attuale, spese del mese ordinate per gruppo (Vita, Necessarie Variabili, Necessarie Fisse, Carta), saldo a fine mese proiettato.
-2. **Analisi Spese (`analisi`)**:
+2. **Analisi Spese (`analisi`)** — nella barra in basso si chiama "Analisi" per far posto al tab Auto:
    - **Overview Anno**: Matrice Categorie × 12 Mesi, riga Uscite Totali del mese, riga Entrate Totali del mese, riga Risparmi del mese, e grafico temporale dell'andamento del Conto Corrente.
    - **Trend Uscite**: Analisi decisionale (50/30/20), prevedibilità e 4 quadranti.
    - **Entrate & Risparmio**: Confronto incassato vs previsto e tasso di risparmio.
@@ -74,9 +74,42 @@ node smoke_ia.js
 node smoke_ia_backend.js
 ```
 
+`smoke_auto.js` (parte pagina), `smoke_boot.js` e `smoke_ia_pagina.js` usano
+`jsdom`, `react@18` e `react-dom@18`, che il repo non installa: senza,
+`smoke_auto.js` salta la parte pagina e lo dice, gli altri due non partono.
+`smoke_boot.js` ha 12 controlli fermi alla vecchia schermata Analisi (falliscono
+anche prima del modulo Auto): vanno riallineati.
+
 ---
 
-## 4. COME TESTARE L'APP NEL BROWSER
+## 4. PUBBLICARE SU GOOGLE APPS SCRIPT
+
+1. Copiare `FINANZE.gs` e `Finanze.html` nel progetto Apps Script (il file HTML
+   deve chiamarsi esattamente `Finanze`).
+2. Se `appsscript.json` elenca gli scope a mano (`oauthScopes`), devono esserci:
+   ```json
+   "oauthScopes": [
+     "https://www.googleapis.com/auth/spreadsheets",
+     "https://www.googleapis.com/auth/script.external_request",
+     "https://www.googleapis.com/auth/script.send_mail",
+     "https://www.googleapis.com/auth/calendar",
+     "https://www.googleapis.com/auth/script.scriptapp",
+     "https://www.googleapis.com/auth/userinfo.email"
+   ]
+   ```
+   I primi due servono a fogli e assistente IA (`IA_FINANZE.md`), gli altri
+   quattro ai promemoria del modulo Auto (`AUTO.md`, §4).
+3. Una volta sola, dall'editor: eseguire `installaTriggerAuto` e concedere i
+   permessi (crea il controllo giornaliero delle scadenze auto).
+4. **Distribuisci → Gestisci distribuzioni → Modifica → Nuova versione**: la web
+   app usa gli scope della versione pubblicata.
+
+Al primo accesso al tab Auto vengono creati i fogli `AUTO_INTERVENTI`,
+`AUTO_KM`, `AUTO_SCADENZE`, `AUTO_PIANO` con i dati di partenza.
+
+---
+
+## 5. COME TESTARE L'APP NEL BROWSER
 
 1. Avviare il server di sviluppo:
    ```bash
