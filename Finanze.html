@@ -329,6 +329,10 @@ function App() {
   const [riscBusy, setRiscBusy] = useState("idle");
   const [entrate, setEntrate] = useState(null);
   const [entBusy, setEntBusy] = useState("idle");
+  const [auto, setAuto] = useState(null);
+  const [autoBusy, setAutoBusy] = useState("idle");
+  const [autoSub, setAutoSub] = useState("cruscotto");
+  const [autoModal, setAutoModal] = useState(null);
   /* Le conversazioni sono un elenco. L'ID di quella attiva vive in un REF
      ed E' il ref la verita': una domanda produce piu' scritture (la
      domanda, poi ogni passaggio del ciclo agentico) e quelle dopo la prima
@@ -534,6 +538,40 @@ function App() {
     }).withFailureHandler(e => { setEntBusy("error"); showFlash("neg", msgErr(e)); }).getDatiEntrate();
   };
   useEffect(() => { if (tab === "analisi" && anSub === "entrate" && !entrate) { (async () => { const c = await stLoad("entrate1"); if (c) { setEntrate(c); setEntBusy("ok"); } loadEntrate(); })(); } }, [tab, anSub]);
+
+  /* AUTO — si carica una volta dopo l'avvio, in silenzio: serve al pallino
+     delle scadenze sulla barra anche se il tab non si apre. Gli errori si
+     dicono solo quando il tab e' aperto. */
+  /* Una funzione che il server non ha (FINANZE.gs non ancora aggiornato)
+     non esiste su google.script.run: chiamarla lancia SUBITO, dentro un
+     effetto, e l'intera app si smonta. Qui diventa un errore leggibile. */
+  const autoRun = (fn, payload, ok, ko) => {
+    try {
+      const r = google.script.run.withSuccessHandler(ok).withFailureHandler(ko);
+      if (typeof r[fn] !== "function") { ko(new Error("Sul server manca " + fn + "(): aggiorna FINANZE.gs nel progetto Apps Script e ripubblica.")); return; }
+      r[fn](payload);
+    } catch (e) { ko(e); }
+  };
+  const loadAuto = (forza, muto) => {
+    if (!hasBackend()) { setAutoBusy("error"); return; }
+    setAutoBusy(b => b === "ok" ? "ok" : "loading");
+    autoRun("getDatiAuto", { forza: !!forza }, d => {
+      if (!d || d.error) { setAutoBusy(b => b === "ok" ? "ok" : "error"); if (!muto) showFlash("neg", d && d.error || "Nessuna risposta dai fogli AUTO."); return; }
+      setAuto(d); setAutoBusy("ok"); stSave("auto1", d).catch(() => {});
+    }, e => { setAutoBusy(b => b === "ok" ? "ok" : "error"); if (!muto) showFlash("neg", msgErr(e)); });
+  };
+  useEffect(() => { if (busy === "ok" && !auto) { stLoad("auto1").then(c => { if (c) { setAuto(a => a || c); setAutoBusy(b => b === "idle" ? "ok" : b); } }); loadAuto(false, true); } }, [busy]);
+  useEffect(() => { if (tab === "auto" && autoBusy === "error") loadAuto(true); }, [tab]);
+  const autoCall = (fn, payload, msgOk) => {
+    if (!hasBackend()) { showFlash("warn", "Offline: impossibile salvare."); return; }
+    showFlash("ok", "Scrivo sul foglio…");
+    autoRun(fn, payload, res => {
+      if (res && res.error) { showFlash("neg", res.error); loadAuto(true, true); return; }
+      showFlash("ok", typeof msgOk === "function" ? msgOk(res) : msgOk);
+      setAutoModal(null); loadAuto(true, true);
+      if (res && res.usciteScritte) reload(true);
+    }, e => showFlash("neg", msgErr(e)));
+  };
   /* Spunta "incassata": aggiornamento ottimistico + rollback, esattamente
      come per le spese pagate. Ricarica anche il payload principale, perche'
      il saldo di adesso della home dipende da questo flag. */
@@ -720,13 +758,15 @@ function App() {
             ? React.createElement(RiscaldamentoView, { risc: risc, busy: riscBusy, onReload: loadRisc, onSave: saveRisc })
             : React.createElement(BollettePanel, { tipo: bolSub, bol: bollette, busy: bolBusy, onReload: loadBollette, onSave: saveBolletta, onDelete: deleteBolletta })
         ),
+        tab === "auto" && React.createElement(AutoHub, { auto: auto, busy: autoBusy, sub: autoSub, setSub: setAutoSub, onReload: loadAuto, onApri: setAutoModal, onCall: autoCall }),
         tab === "ia" && React.createElement(ChatFin, { ctx: iaCtx, cats: cats, catTipo: catTipo, ia: ia, msgs: iaMsgs, setMsgs: setIaMsgs, onChiedi: chiediAlModello, onScrivi: scriviDaIA, onRicarica: () => reload(true), onConfig: configIA,
           chats: chats, chatId: chatId, onNuovaChat: nuovaChat, onApriChat: vaiAChat, onEliminaChat: eliminaChat, onRinominaChat: rinominaChat }),
         tab === "list" && React.createElement(ListView, { data: data, model: model, year: year, cats: cats, onTogglePaid: togglePaid, onEdit: setEditing }),
         tab === "impostazioni" && React.createElement(Impostazioni, { data: data, onSalvaCat: salvaCategorie, onChiudi: () => setTab("home") })
       ),
       editing && React.createElement(EditModal, { mov: editing, cats: cats, catTipo: catTipo, onClose: () => setEditing(null), onSave: saveEdit, onDelete: deleteExpense }),
-      React.createElement(TabBar, { tab: tab, setTab: setTab })
+      autoModal && React.createElement(AutoModali, { m: autoModal, auto: auto, onClose: () => setAutoModal(null), onCall: autoCall }),
+      React.createElement(TabBar, { tab: tab, setTab: setTab, badge: { auto: auto ? autoRiepilogo(auto, autoOggi()).badge : 0 } })
     )
   );
 }
@@ -1319,6 +1359,365 @@ function matriceAnno(movs, rows, data, annoScelto, opz) {
   };
 }
 /* ANALISI:CORE:END */
+
+/* AUTO:CORE:START — motore del modulo Auto (manutenzione, scadenze, costi).
+   Funzioni PURE: nessun React, nessun google.script. Ricevono il payload di
+   getDatiAuto() e la data di oggi in ISO, e restituiscono numeri e liste.
+   Cosi' girano anche in Node (smoke_auto.js) e una regola sbagliata si
+   vede in un test, non sul telefono il giorno della scadenza.
+
+   I SOLDI STANNO IN USCITE. Il modulo non tiene importi suoi: legge le righe
+   MACCHINA e GASOLIO e le classifica dalla nota. I fogli AUTO_* tengono solo
+   quello che USCITE non sa (km, voci, officina, scadenze, piano). Un solo
+   dato, in un solo posto: niente doppioni da riallineare. */
+const AUTO_CLASSI = ["Gasolio", "Manutenzione", "Bollo", "Assicurazione", "Revisione", "Pedaggi", "Lavaggio", "Altro"];
+const AUTO_TIPI = ["TAGLIANDO", "REVISIONE", "STRAORDINARIO", "GOMME", "CARROZZERIA", "ALTRO"];
+const AUTO_TIPI_LAB = { TAGLIANDO: "Tagliando", REVISIONE: "Revisione", STRAORDINARIO: "Straordinario", GOMME: "Gomme", CARROZZERIA: "Carrozzeria", ALTRO: "Altro" };
+/* La scadenza dice di quale classe sono le righe che la pagano. */
+const AUTO_SCAD_CLASSE = { RCA: "Assicurazione", BOLLO: "Bollo", REVISIONE: "Revisione" };
+
+/* L'ordine conta: "Tagliando e cambio catena" e' manutenzione anche se
+   contiene "CAMBIO"; "ASSICURAZIONE AUTO" e' assicurazione e non "Altro". */
+function autoClassifica(cat, nota) {
+  const c = String(cat || "").toUpperCase().trim(), n = String(nota || "").toUpperCase();
+  if (c === "GASOLIO") return "Gasolio";
+  if (/BOLLO/.test(n)) return "Bollo";
+  if (/ASSICUR|\bASS\b|\bRCA\b/.test(n)) return "Assicurazione";
+  if (/REVISION/.test(n)) return "Revisione";
+  if (/TAGLIAN|CATENA|CINGHIA|OLIO|GOMM|PNEUM|MECCAN|OFFICIN|FRENI|PASTIGL|BATTER|CARROZZ|FILTR|AUTO-\d/.test(n)) return "Manutenzione";
+  if (/AUTOSTRAD|PEDAGG|TELEPASS/.test(n)) return "Pedaggi";
+  if (/LAVAGG/.test(n)) return "Lavaggio";
+  return "Altro";
+}
+
+/* ---- date in ISO (YYYY-MM-DD), sempre a mezzanotte locale ---- */
+function autoD(iso) { const m = String(iso || "").match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null; }
+function autoIso(d) { return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); }
+function autoOggi() { return autoIso(new Date()); }
+function autoGiorni(da, a) { const x = autoD(da), y = autoD(a); return x && y ? Math.round((y - x) / 86400000) : null; }
+function autoDataIt(iso) { const d = autoD(iso); return d ? String(d.getDate()).padStart(2, "0") + "/" + String(d.getMonth() + 1).padStart(2, "0") + "/" + d.getFullYear() : "—"; }
+function autoMeseIt(iso) { const d = autoD(iso); return d ? String(d.getMonth() + 1).padStart(2, "0") + "/" + d.getFullYear() : "—"; }
+function autoFineMese(iso) { const d = autoD(iso); return d ? autoIso(new Date(d.getFullYear(), d.getMonth() + 1, 0)) : ""; }
+/* +n mesi tenendo il giorno; se il giorno non esiste (31 -> 30 aprile)
+   si va all'ultimo del mese. Una data che era l'ultimo del mese resta
+   l'ultimo del mese: la revisione "entro fine dicembre" resta fine mese. */
+function autoPiuMesi(iso, n) {
+  const d = autoD(iso); if (!d) return "";
+  const fineMese = d.getDate() === new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+  const t = new Date(d.getFullYear(), d.getMonth() + n, 1);
+  const ult = new Date(t.getFullYear(), t.getMonth() + 1, 0).getDate();
+  return autoIso(new Date(t.getFullYear(), t.getMonth(), fineMese ? ult : Math.min(d.getDate(), ult)));
+}
+function autoMeseIdx(iso) { const d = autoD(iso); return d ? d.getFullYear() * 12 + d.getMonth() : null; }
+
+/* La revisione si conta dal MESE in cui e' stata fatta: +24 mesi, entro
+   l'ultimo giorno di quel mese. Senza revisioni registrate vale la prima:
+   4 anni dall'immatricolazione. */
+function autoProssimaRevisione(dataUltima, immatricolazione) {
+  if (dataUltima) return autoFineMese(autoPiuMesi(String(dataUltima).slice(0, 7) + "-01", 24));
+  if (immatricolazione) return autoFineMese(autoPiuMesi(String(immatricolazione).slice(0, 7) + "-01", 48));
+  return "";
+}
+
+/* Obbligo invernale (gomme o catene a bordo) dal 15/11 al 15/04, dove c'e'
+   ordinanza. Con le estive tutto l'anno vale "catene a bordo". */
+function autoCatene(oggi) {
+  const d = autoD(oggi); if (!d) return null;
+  const y = d.getFullYear(), m = d.getMonth(), g = d.getDate();
+  const inCorso = m > 10 || (m === 10 && g >= 15) || m < 3 || (m === 3 && g <= 15);
+  if (inCorso) {
+    const al = (m >= 10 ? y + 1 : y) + "-04-15";
+    return { inCorso: true, dal: (m >= 10 ? y : y - 1) + "-11-15", al: al, giorni: autoGiorni(oggi, al) };
+  }
+  const dal = y + "-11-15";
+  return { inCorso: false, dal: dal, al: (y + 1) + "-04-15", giorni: autoGiorni(oggi, dal) };
+}
+
+/* ---- chilometri ---- */
+function autoLetture(dati) {
+  const out = [];
+  ((dati && dati.km) || []).forEach(k => { if (k.data && k.km > 0) out.push({ data: k.data, km: k.km }); });
+  ((dati && dati.interventi) || []).forEach(i => { if (i.data && i.km > 0) out.push({ data: i.data, km: i.km }); });
+  out.sort((a, b) => a.data < b.data ? -1 : a.data > b.data ? 1 : a.km - b.km);
+  return out;
+}
+function autoKmAttuali(dati) {
+  const l = autoLetture(dati); if (!l.length) return null;
+  let best = l[0];
+  l.forEach(x => { if (x.km > best.km || (x.km === best.km && x.data > best.data)) best = x; });
+  return best;
+}
+/* Media mensile solo se le letture coprono almeno due mesi: con cinque
+   settimane e un km di tagliando arrotondato verrebbe un numero inventato. */
+/* Km a una data, per interpolazione fra le due letture che la stringono.
+   Serve agli interventi registrati senza km: si mostra come STIMA, non si
+   scrive mai nel foglio. Fuori dall'intervallo delle letture: null. */
+function autoKmStimati(dati, data) {
+  const l = autoLetture(dati); if (!data || l.length < 2) return null;
+  let prima = null, dopo = null;
+  l.forEach(x => { if (x.data <= data && (!prima || x.data >= prima.data)) prima = x; if (x.data >= data && (!dopo || x.data < dopo.data)) dopo = x; });
+  if (!prima || !dopo) return null;
+  if (prima.data === dopo.data) return prima.km;
+  const t = autoGiorni(prima.data, data) / autoGiorni(prima.data, dopo.data);
+  return Math.round(prima.km + (dopo.km - prima.km) * t);
+}
+/* I km non tornano indietro: una lettura a una data non puo' essere minore
+   di una lettura precedente ne' maggiore di una successiva. `escludiId`
+   toglie l'intervento che si sta modificando (i suoi km vecchi). Torna il
+   motivo, o "" se va bene. */
+function autoKmIncoerenti(dati, data, km, escludiId) {
+  if (!data || !(km > 0)) return "";
+  const l = [];
+  ((dati && dati.km) || []).forEach(k => { if (k.data && k.km > 0) l.push(k); });
+  ((dati && dati.interventi) || []).forEach(i => { if (i.data && i.km > 0 && i.id !== escludiId) l.push(i); });
+  const prima = l.filter(x => x.data <= data && x.km > km).sort((a, b) => b.km - a.km)[0];
+  if (prima) return "Il " + autoDataIt(prima.data) + " erano già " + prima.km.toLocaleString("it-IT") + " km";
+  const dopo = l.filter(x => x.data >= data && x.km < km).sort((a, b) => a.km - b.km)[0];
+  if (dopo) return "Il " + autoDataIt(dopo.data) + " erano " + dopo.km.toLocaleString("it-IT") + " km: questa lettura è troppo alta";
+  return "";
+}
+function autoKmMese(dati) {
+  const l = autoLetture(dati); if (l.length < 2) return null;
+  const a = l[0], b = l[l.length - 1], gg = autoGiorni(a.data, b.data);
+  if (gg == null || gg < 60 || b.km <= a.km) return null;
+  return Math.round((b.km - a.km) / gg * 30.44);
+}
+
+function autoStato(giorni, preavviso) {
+  if (giorni == null) return "ignoto";
+  if (giorni < 0) return "scaduto";
+  if (giorni <= 7) return "urgente";
+  if (giorni <= (preavviso || 30)) return "presto";
+  return "ok";
+}
+
+/* Una voce del piano: scade a km, a data o a entrambi (vince la prima).
+   KM_SCAD / DATA_SCAD scritti (dal computer di bordo) battono il calcolo
+   ultimo + intervallo. */
+function autoPianoVoce(p, kmAtt, oggi, kmMese) {
+  const kmScad = p.kmScad > 0 ? p.kmScad : (p.ultimoKm > 0 && p.intervalloKm > 0 ? p.ultimoKm + p.intervalloKm : null);
+  const dataScad = p.dataScad || (p.ultimaData && p.intervalloMesi > 0 ? autoPiuMesi(p.ultimaData, p.intervalloMesi) : "");
+  const residuoKm = kmScad != null && kmAtt ? kmScad - kmAtt.km : null;
+  const giorniData = dataScad ? autoGiorni(oggi, dataScad) : null;
+  const giorniKm = residuoKm != null && kmMese ? Math.round(residuoKm / kmMese * 30.44) : null;
+  let giorni = giorniData;
+  if (giorniKm != null && (giorni == null || giorniKm < giorni)) giorni = giorniKm;
+  let stato;
+  if (residuoKm != null && residuoKm < 0) stato = "scaduto";
+  else if (giorni != null) stato = autoStato(giorni, 30);
+  else if (residuoKm != null) stato = residuoKm <= 1000 ? "presto" : "ok";
+  else stato = p.ultimaData || p.ultimoKm ? "fatto" : "ignoto";
+  if (residuoKm != null && residuoKm >= 0 && residuoKm <= 500 && stato === "ok") stato = "presto";
+  let testo;
+  if (residuoKm != null && dataScad) testo = (residuoKm < 0 ? "superato di " + (-residuoKm).toLocaleString("it-IT") + " km" : "tra " + residuoKm.toLocaleString("it-IT") + " km") + " o entro " + autoMeseIt(dataScad);
+  else if (residuoKm != null) testo = residuoKm < 0 ? "superato di " + (-residuoKm).toLocaleString("it-IT") + " km" : "tra " + residuoKm.toLocaleString("it-IT") + " km";
+  else if (dataScad) testo = "entro " + autoDataIt(dataScad);
+  else if (stato === "fatto") testo = "fatto" + (p.ultimaData ? " " + autoMeseIt(p.ultimaData) : "") + (p.ultimoKm ? " a " + p.ultimoKm.toLocaleString("it-IT") + " km" : "");
+  else testo = "storico mancante";
+  return Object.assign({}, p, { kmScadCalc: kmScad, dataScadCalc: dataScad, residuoKm: residuoKm, giorni: giorni, stato: stato, testo: testo });
+}
+
+/* Tutte le scadenze, ordinate per urgenza. Le voci del piano entrano solo
+   se sono vicine, piu' l'olio motore che e' "il tagliando". */
+function autoScadenze(dati, oggi) {
+  const out = [];
+  ((dati && dati.scadenze) || []).forEach(s => {
+    if (!s.scadenza) return;
+    const g = autoGiorni(oggi, s.scadenza);
+    out.push({ tipo: "scadenza", chiave: s.chiave, etichetta: s.etichetta || s.chiave, data: s.scadenza, giorni: g, importo: s.importo || 0, note: s.note || "", stato: autoStato(g, s.preavviso || 30), src: s });
+  });
+  const c = autoCatene(oggi);
+  if (c) out.push(c.inCorso
+    ? { tipo: "catene", chiave: "CATENE", etichetta: "Catene a bordo", data: c.al, giorni: c.giorni, importo: 0, note: "obbligo in corso fino al 15/04", stato: "info", inCorso: true }
+    : { tipo: "catene", chiave: "CATENE", etichetta: "Catene a bordo", data: c.dal, giorni: c.giorni, importo: 0, note: "dal 15/11 al 15/04 · gomme estive tutto l'anno", stato: autoStato(c.giorni, 30) });
+  const kmAtt = autoKmAttuali(dati), kmMese = autoKmMese(dati);
+  ((dati && dati.piano) || []).forEach(p => {
+    const v = autoPianoVoce(p, kmAtt, oggi, kmMese);
+    const chiave = String(p.voce || "").toUpperCase();
+    if (chiave !== "OLIO MOTORE" && ["scaduto", "urgente", "presto"].indexOf(v.stato) < 0) return;
+    out.push({ tipo: "piano", chiave: "PIANO:" + chiave, etichetta: chiave === "OLIO MOTORE" ? "Tagliando · computer di bordo" : p.voce, data: v.dataScadCalc || "", giorni: v.giorni, residuoKm: v.residuoKm, importo: 0, note: v.testo, stato: v.stato, src: p });
+  });
+  const peso = s => s.giorni != null ? s.giorni : s.residuoKm != null ? (s.residuoKm <= 1000 ? 5 : 3650) : 99999;
+  out.sort((a, b) => peso(a) - peso(b));
+  return out;
+}
+
+/* ---- costi (da USCITE) ---- */
+function autoRighe(dati) {
+  return ((dati && dati.uscite) || []).map(u => Object.assign({}, u, { classe: autoClassifica(u.cat, u.nota), annoData: u.data ? +u.data.slice(0, 4) : u.anno }));
+}
+/* Bollo di un anno passato pagato dopo: "BOLLO 2024 CON SANZIONI" a luglio
+   2026. Si conta nell'anno in cui esce, ma NON e' un costo ricorrente. */
+function autoBolloArretrato(u) {
+  const m = String(u.nota || "").toUpperCase().match(/BOLLO\D{0,3}(20\d\d)/);
+  return m && u.annoData && +m[1] < u.annoData ? +m[1] : null;
+}
+function autoBolloStandard(dati) {
+  const s = ((dati && dati.scadenze) || []).filter(x => x.chiave === "BOLLO")[0];
+  return s && s.importo > 0 ? s.importo : null;
+}
+function autoCostiAnno(dati, anno) {
+  const righe = autoRighe(dati).filter(u => u.annoData === anno);
+  const per = {}; AUTO_CLASSI.forEach(k => { per[k] = 0; });
+  let tot = 0, previsto = 0, arretrati = 0;
+  righe.forEach(u => {
+    per[u.classe] += u.importo; tot += u.importo;
+    if (!u.paid) previsto += u.importo;
+    if (u.classe === "Bollo" && autoBolloArretrato(u)) arretrati += u.importo;
+  });
+  const straord = ((dati && dati.interventi) || []).filter(i => i.data && +i.data.slice(0, 4) === anno).reduce((s, i) => s + (i.straord || 0), 0);
+  const ordinario = Math.max(0, tot - straord - arretrati);
+  const r = x => Math.round(x * 100) / 100;
+  AUTO_CLASSI.forEach(k => { per[k] = r(per[k]); });
+  return { anno: anno, tot: r(tot), previsto: r(previsto), per: per, arretrati: r(arretrati), straord: r(straord), ordinario: r(ordinario), mensile: r(tot / 12), ordMensile: r(ordinario / 12), n: righe.length };
+}
+/* Sanzioni stimate: quanto i bolli pagati in ritardo sono costati in piu'
+   del bollo normale. Solo se il bollo normale e' noto. */
+function autoSanzioniBollo(dati) {
+  const std = autoBolloStandard(dati); if (!std) return [];
+  const perAnno = {};
+  autoRighe(dati).forEach(u => { if (u.classe !== "Bollo") return; const y = autoBolloArretrato(u); if (y) perAnno[y] = (perAnno[y] || 0) + u.importo; });
+  return Object.keys(perAnno).sort().map(y => ({ anno: +y, pagato: Math.round(perAnno[y] * 100) / 100, extra: Math.max(0, Math.round((perAnno[y] - std) * 100) / 100) }));
+}
+function autoAnni(dati, oggi) {
+  const lim = +String(oggi).slice(0, 4) + 1, s = {};
+  autoRighe(dati).forEach(u => { if (u.annoData && u.annoData <= lim) s[u.annoData] = 1; });
+  return Object.keys(s).map(Number).sort((a, b) => a - b);
+}
+function autoProssime(dati, oggi, giorni) {
+  const lim = autoIso(new Date(autoD(oggi).getTime() + (giorni || 365) * 86400000));
+  return autoRighe(dati).filter(u => u.data && u.data >= oggi && u.data <= lim && u.classe !== "Gasolio").sort((a, b) => a.data < b.data ? -1 : 1);
+}
+
+/* ---- interventi e righe collegate ---- */
+function autoEtichetta(i) {
+  const v = (i.voci || []).map(x => x.nome).filter(Boolean);
+  if (v.length) return v.length > 2 ? v.slice(0, 2).join(" + ") + " +" + (v.length - 2) : v.join(" + ");
+  return (i.tipi || []).map(t => AUTO_TIPI_LAB[t] || t).join(" + ") || "Intervento";
+}
+/* Le righe scritte dall'app portano "[AUTO-0012]" nella nota. Quelle di
+   prima no: si prendono quelle della stessa classe da un mese prima a
+   cinque mesi dopo l'intervento (le rate), non gia' prese da un altro. */
+function autoCollegate(dati, intervento) {
+  const righe = autoRighe(dati), id = String(intervento.id || "").toUpperCase();
+  const tag = righe.filter(u => id && String(u.nota || "").toUpperCase().indexOf("[" + id + "]") >= 0);
+  if (tag.length) return tag;
+  const classe = (intervento.tipi || []).indexOf("REVISIONE") >= 0 && (intervento.tipi || []).length === 1 ? "Revisione" : "Manutenzione";
+  const da = autoIso(new Date(autoD(intervento.data).getTime() - 30 * 86400000));
+  const a = autoIso(new Date(autoD(intervento.data).getTime() + 150 * 86400000));
+  return righe.filter(u => u.classe === classe && u.data >= da && u.data <= a && !/\[AUTO-\d+\]/i.test(u.nota || ""));
+}
+
+/* ---- incoerenze tra quello che si sa e quello che c'e' in USCITE ----
+   Ognuna puo' portare un'AZIONE gia' pronta: l'app la mostra per intero e la
+   scrive solo dopo la conferma. */
+function autoIncoerenze(dati, oggi) {
+  const out = [], righe = autoRighe(dati);
+  const r2 = x => Math.round(x * 100) / 100;
+  const primaUscita = righe.reduce((m, u) => u.data && (!m || u.data < m) ? u.data : m, "");
+  const eu = x => r2(x).toLocaleString("it-IT", { minimumFractionDigits: 0, maximumFractionDigits: 2 }) + " €";
+
+  // 1) costo dell'intervento contro le righe che lo pagano
+  ((dati && dati.interventi) || []).forEach(i => {
+    if (!i.data || !(i.costo > 0) || i.pagamento === "NESSUNA" || (primaUscita && i.data < primaUscita)) return;
+    const col = autoCollegate(dati, i), somma = r2(col.reduce((s, u) => s + u.importo, 0)), diff = r2(i.costo - somma);
+    if (Math.abs(diff) < 1) return;
+    const ultima = col.reduce((m, u) => !m || u.data > m ? u.data : m, "") || i.data;
+    out.push({
+      id: "costo:" + i.id, livello: "alto",
+      testo: autoEtichetta(i) + ": fattura " + eu(i.costo) + ", in USCITE " + eu(somma),
+      dettaglio: diff > 0 ? "Mancano " + eu(diff) + " nelle rate." : "In USCITE ci sono " + eu(-diff) + " in più della fattura.",
+      azione: diff > 0 ? { tipo: "crea", righe: [{ data: ultima, importo: diff, nota: autoEtichetta(i) + " — differenza su fattura " + i.id }] } : null
+    });
+  });
+
+  // 2) revisioni previste fuori dal ciclo di 24 mesi
+  const rev = ((dati && dati.scadenze) || []).filter(s => s.chiave === "REVISIONE" && s.scadenza)[0];
+  let revFuori = false;
+  if (rev) {
+    const base = autoMeseIdx(rev.scadenza);
+    const fuori = righe.filter(u => u.classe === "Revisione" && u.data > oggi).filter(u => { const k = (autoMeseIdx(u.data) - base) / 24, near = Math.round(k); return Math.abs(autoMeseIdx(u.data) - (base + near * 24)) > 1 || near < 0; });
+    if (fuori.length) {
+      revFuori = true;
+      const sposta = fuori.map(u => {
+        const k = Math.floor((autoMeseIdx(u.data) - base) / 24), mi = base + Math.max(0, k) * 24, y = Math.floor(mi / 12), m = mi % 12;
+        const g = Math.min(autoD(u.data).getDate(), new Date(y, m + 1, 0).getDate());
+        return { row: u.row, importo: u.importo, da: u.data, data: autoIso(new Date(y, m, g)) };
+      });
+      out.push({
+        id: "revciclo:" + fuori.map(u => u.row).join(","), livello: "alto",
+        testo: fuori.length + " revisioni previste fuori ciclo (" + fuori.slice(0, 2).map(u => autoMeseIt(u.data)).join(", ") + (fuori.length > 2 ? "…" : "") + ")",
+        dettaglio: "Il ciclo parte dalla prossima, entro " + autoDataIt(rev.scadenza) + ", e va avanti ogni 24 mesi.",
+        azione: { tipo: "date", righe: sposta.map(s => ({ row: s.row, importo: s.importo, da: s.da, data: s.data })) }
+      });
+    }
+  }
+
+  // 3) scadenze vicine che in USCITE non hanno una riga
+  ((dati && dati.scadenze) || []).forEach(s => {
+    const classe = AUTO_SCAD_CLASSE[s.chiave];
+    if (!classe || !s.scadenza || !(s.importo > 0)) return;
+    if (s.chiave === "REVISIONE" && revFuori) return; // la sistema la 2)
+    const g = autoGiorni(oggi, s.scadenza);
+    if (g == null || g < -30 || g > 450) return;
+    const da = autoIso(new Date(autoD(s.scadenza).getTime() - 45 * 86400000)), a = autoIso(new Date(autoD(s.scadenza).getTime() + 75 * 86400000));
+    if (righe.some(u => u.classe === classe && u.data >= da && u.data <= a)) return;
+    out.push({
+      id: "manca:" + s.chiave + ":" + s.scadenza, livello: "medio",
+      testo: (s.etichetta || s.chiave) + " del " + autoDataIt(s.scadenza) + " non prevista in USCITE",
+      dettaglio: "Senza la riga il saldo proiettato di quel mese è più alto del vero di " + eu(s.importo) + ".",
+      azione: { tipo: "crea", righe: [{ data: s.scadenza, importo: s.importo, nota: (s.etichetta || s.chiave).toUpperCase() }] }
+    });
+  });
+
+  // 4) il prossimo tagliando non e' in USCITE
+  const tagl = ((dati && dati.interventi) || []).filter(i => (i.tipi || []).indexOf("TAGLIANDO") >= 0 && i.data).sort((a, b) => a.data < b.data ? 1 : -1)[0];
+  if (tagl) {
+    const olio = ((dati && dati.piano) || []).filter(p => String(p.voce || "").toUpperCase() === "OLIO MOTORE")[0];
+    const prevista = (olio && olio.dataScad) || autoPiuMesi(tagl.data, 12);
+    const giaPrese = {};
+    ((dati && dati.interventi) || []).forEach(i => autoCollegate(dati, i).forEach(u => { giaPrese[u.row] = 1; }));
+    const lim = autoIso(new Date(autoD(oggi).getTime() + 400 * 86400000));
+    const c = r2((tagl.costo || 0) - (tagl.straord || 0));
+    if (prevista > oggi && prevista <= lim && c > 0 && !righe.some(u => u.classe === "Manutenzione" && u.data > oggi && u.data <= lim && !giaPrese[u.row])) {
+      out.push({
+        id: "tagliando:" + prevista, livello: "medio",
+        testo: "Prossimo tagliando (" + autoMeseIt(prevista) + ") non previsto in USCITE",
+        dettaglio: "Stima: " + eu(c) + ", il costo ordinario dell'ultimo tagliando.",
+        azione: { tipo: "crea", righe: [{ data: prevista, importo: c, nota: "TAGLIANDO (stima)" }] }
+      });
+    }
+  }
+
+  // 5) DATA e ANNO/MESE che non coincidono
+  const sfasate = righe.filter(u => { const d = autoD(u.data); return d && u.anno && u.mese >= 0 && (d.getFullYear() !== u.anno || d.getMonth() !== u.mese); });
+  if (sfasate.length) out.push({
+    id: "annomese:" + sfasate.map(u => u.row).join(","), livello: "basso",
+    testo: sfasate.length + (sfasate.length === 1 ? " riga" : " righe") + " con DATA diversa da ANNO/MESE",
+    dettaglio: sfasate.slice(0, 3).map(u => autoDataIt(u.data) + " segnata " + String(u.mese + 1).padStart(2, "0") + "/" + u.anno).join(" · ") + ". Se è l'addebito della carta voluto, ignora.",
+    azione: { tipo: "date", righe: sfasate.map(u => ({ row: u.row, importo: u.importo, data: u.data })) }
+  });
+
+  // 6) righe nel futuro gia' segnate pagate
+  const futurePagate = righe.filter(u => u.paid && u.data > oggi && !u.cc);
+  if (futurePagate.length) out.push({
+    id: "pagatefuture:" + futurePagate.map(u => u.row).join(","), livello: "basso",
+    testo: futurePagate.length + (futurePagate.length === 1 ? " riga futura segnata PAGATA" : " righe future segnate PAGATE"),
+    dettaglio: futurePagate.slice(0, 3).map(u => autoDataIt(u.data) + " " + u.nota).join(" · "),
+    azione: { tipo: "stato", righe: futurePagate.map(u => ({ row: u.row, importo: u.importo })), paid: 0 }
+  });
+  return out;
+}
+
+/* Tutto quello che il cruscotto e il pallino sulla barra devono sapere. */
+function autoRiepilogo(dati, oggi) {
+  const scad = autoScadenze(dati, oggi);
+  const conta = scad.filter(s => s.stato === "scaduto" || s.stato === "urgente" || s.stato === "presto").length;
+  const stato = scad.some(s => s.stato === "scaduto") ? "scaduto" : scad.some(s => s.stato === "urgente") ? "urgente" : "ok";
+  const ult = ((dati && dati.interventi) || []).filter(i => i.data).sort((a, b) => a.data < b.data ? 1 : -1)[0] || null;
+  return { scadenze: scad, badge: conta, stato: stato, ultimo: ult, kmAtt: autoKmAttuali(dati), kmMese: autoKmMese(dati), costi: autoCostiAnno(dati, +String(oggi).slice(0, 4)) };
+}
+/* AUTO:CORE:END */
 
 /* ============================================================
    IA:CORE:START — MOTORE DELL'ASSISTENTE.
@@ -5561,14 +5960,477 @@ function ChatFin({ ctx, cats, catTipo, ia, msgs, setMsgs, onChiedi, onScrivi, on
                 background: !q.trim() ? C.panel2 : C.disp, color: !q.trim() ? C.faint : "#08131C", fontSize: 17, fontWeight: 700 } }, "↑"))));
 }
 
-function TabBar({ tab, setTab }) {
-  /* Sei voci, non piu' cinque. Con l'etichetta a 10,5px la fila misurava
-     322px su uno schermo da 320 e "Movimenti" veniva tagliata: la barra e'
-     `position:fixed`, quindi il taglio non produce nemmeno uno scorrimento
-     che lo denunci. A 9,5px la fila sta in 291px e ci sta anche sui
-     telefoni piccoli. */
-  const items = [["home", "Panoramica", "▤"], ["analisi", "Analisi Spese", "◵"], ["add", "Aggiungi", "＋"], ["ia", "Chiedi", "✦"], ["bollette", "Bollette", "⚡"], ["list", "Movimenti", "≣"]];
-  return React.createElement("div", { style: { position: "fixed", bottom: 0, left: 0, right: 0, background: "rgba(14,22,32,.92)", backdropFilter: "blur(8px)", borderTop: `1px solid ${C.line}` } }, React.createElement("div", { style: { maxWidth: 480, margin: "0 auto", display: "flex" } }, items.map(([k, t, ic]) => React.createElement("button", { key: k, onClick: () => setTab(k), style: { flex: 1, background: "none", border: "none", cursor: "pointer", padding: "12px 0 16px", color: tab === k ? C.disp : C.mut, display: "flex", flexDirection: "column", alignItems: "center", gap: 3 } }, React.createElement("span", { style: { fontSize: 20, lineHeight: 1 } }, ic), React.createElement("span", { style: { fontSize: 8.5, fontWeight: 600, letterSpacing: .1, whiteSpace: "nowrap" } }, t)))));
+/* ============================================================
+   AUTO — INTERFACCIA
+   Il motore sta in AUTO:CORE; qui c'e' solo come si vede. Componenti
+   TOP-LEVEL (fuori da App), come gli altri moduli: dentro App cambierebbero
+   identita' a ogni render e i campi perderebbero il focus.
+   ============================================================ */
+const aH = React.createElement;
+const AUTO_STATO_C = { scaduto: C.neg, urgente: C.neg, presto: C.amber, ok: C.disp, fatto: C.disp, info: "#5B84C4", ignoto: C.faint };
+const autoEu = n => eurC(Math.round((n || 0) * 100) / 100);
+const autoKmIt = n => n == null ? "—" : Math.round(n).toLocaleString("it-IT");
+const autoLbl = { fontSize: 10.5, letterSpacing: 1, color: C.faint, fontWeight: 600, marginTop: 14 };
+const autoInp = { width: "100%", background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 10, padding: "10px 11px", color: C.ink, fontSize: 14, outline: "none", marginTop: 5, colorScheme: "dark" };
+const autoCard = { background: C.panel, border: `1px solid ${C.line}`, borderRadius: 14, padding: "12px 13px" };
+const autoBtn = (primario) => ({ minHeight: 44, padding: "0 14px", borderRadius: 11, border: primario ? "none" : `1px solid ${C.line}`, background: primario ? C.disp : C.panel2, color: primario ? "#08131C" : C.ink, fontWeight: 800, fontSize: 13, cursor: "pointer" });
+const autoTitoletto = (t, destra) => aH("div", { style: { padding: "16px 2px 8px", display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 } },
+  aH("div", { style: { fontSize: 11, fontWeight: 700, letterSpacing: 1, color: C.mut } }, t), destra || null);
+
+function AutoSheet({ titolo, onClose, children }) {
+  return aH("div", { onClick: onClose, style: { position: "fixed", inset: 0, background: "rgba(5,10,16,.66)", backdropFilter: "blur(2px)", zIndex: 50, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+    aH("div", { onClick: e => e.stopPropagation(), style: { width: "100%", maxWidth: 480, maxHeight: "94vh", overflowY: "auto", background: C.panel, borderTopLeftRadius: 20, borderTopRightRadius: 20, border: `1px solid ${C.line}`, padding: 18, paddingBottom: 28 } },
+      aH("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
+        aH("div", { style: { fontSize: 15, fontWeight: 700 } }, titolo),
+        aH("button", { onClick: onClose, "aria-label": "Chiudi", style: { background: "none", border: "none", color: C.mut, fontSize: 22, cursor: "pointer", lineHeight: 1, minWidth: 44, minHeight: 44 } }, "✕")),
+      children));
+}
+
+function AutoHub({ auto, busy, sub, setSub, onReload, onApri, onCall }) {
+  const tabs = [["cruscotto", "Cruscotto"], ["storico", "Storico"], ["piano", "Piano"], ["costi", "Costi"]];
+  const oggi = autoOggi();
+  const r = useMemo(() => auto ? autoRiepilogo(auto, oggi) : null, [auto, oggi]);
+  const inc = useMemo(() => auto ? autoIncoerenze(auto, oggi) : [], [auto, oggi]);
+  return aH(React.Fragment, null,
+    aH("div", { style: { padding: "8px 18px 0" } },
+      aH("div", { style: { display: "flex", background: C.panel, borderRadius: 12, padding: 4, border: `1px solid ${C.line}` } },
+        tabs.map(([k, t]) => aH("button", { key: k, onClick: () => setSub(k), style: { flex: 1, padding: 9, borderRadius: 9, border: "none", cursor: "pointer", fontWeight: 700, fontSize: 12.5, background: sub === k ? C.panel2 : "transparent", color: sub === k ? C.disp : C.mut } }, t)))),
+    !auto
+      ? aH("div", { style: { padding: 40, textAlign: "center", color: C.mut } },
+        busy === "error"
+          ? aH(React.Fragment, null, aH("div", { style: { fontSize: 30, color: C.neg } }, "⚠"), aH("div", { style: { marginTop: 8, fontSize: 13 } }, "Impossibile leggere i fogli AUTO."), aH("button", { onClick: () => onReload(true), style: { ...autoBtn(true), marginTop: 12 } }, "Riprova"))
+          : aH(React.Fragment, null, aH("div", { style: { fontSize: 30, color: C.disp } }, "◒"), aH("div", { style: { marginTop: 8, fontSize: 13 } }, "Carico i dati dell'auto…")))
+      : aH("div", { style: { padding: "0 18px" } },
+        sub === "cruscotto" ? aH(AutoCruscotto, { d: auto, r: r, inc: inc, oggi: oggi, onApri: onApri, onCall: onCall, setSub: setSub })
+          : sub === "storico" ? aH(AutoStorico, { d: auto, onApri: onApri })
+          : sub === "piano" ? aH(AutoPiano, { d: auto, r: r, oggi: oggi, onApri: onApri })
+          : aH(AutoCosti, { d: auto, inc: inc, oggi: oggi, onApri: onApri })));
+}
+
+function AutoScadRiga({ s, onClick }) {
+  const col = AUTO_STATO_C[s.stato] || C.mut;
+  const forte = s.stato === "scaduto" || s.stato === "urgente" || s.stato === "presto";
+  let quando;
+  if (s.inCorso) quando = "in corso fino al 15/04";
+  else if (s.tipo === "piano") quando = s.note;
+  else if (s.giorni == null) quando = autoDataIt(s.data);
+  else quando = autoDataIt(s.data) + " · " + (s.giorni < 0 ? "scaduta da " + (-s.giorni) + " gg" : s.giorni === 0 ? "OGGI" : "tra " + s.giorni + " gg");
+  const destra = s.importo > 0 ? autoEu(s.importo) : s.giorni != null && s.giorni >= 0 && s.tipo !== "piano" ? s.giorni + " gg" : "";
+  return aH("button", { onClick: onClick, style: { ...autoCard, width: "100%", textAlign: "left", color: C.ink, cursor: onClick ? "pointer" : "default", border: `1px solid ${forte ? col : C.line}`, display: "flex", gap: 12, alignItems: "center" } },
+    aH("span", { style: { width: 10, height: 10, borderRadius: 5, background: col, flex: "0 0 auto" } }),
+    aH("span", { style: { flex: 1, minWidth: 0 } },
+      aH("span", { style: { display: "flex", justifyContent: "space-between", gap: 8 } },
+        aH("span", { style: { fontWeight: 700, fontSize: 13.5 } }, s.etichetta),
+        destra && aH("span", { style: { fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 13, color: forte ? col : C.ink } }, destra)),
+      aH("span", { style: { display: "block", fontSize: 11.5, color: forte ? col : C.mut, marginTop: 2, fontWeight: forte ? 600 : 400 } }, quando),
+      s.tipo !== "piano" && s.note && aH("span", { style: { display: "block", fontSize: 10.5, color: C.faint, marginTop: 2 } }, s.note)));
+}
+
+function AutoCruscotto({ d, r, inc, oggi, onApri, onCall, setSub }) {
+  const v = d.veicolo || {};
+  const statoLab = r.stato === "scaduto" ? ["SCADUTO", C.neg] : r.stato === "urgente" ? ["IN SCADENZA", C.amber] : ["IN REGOLA", C.disp];
+  const ult = r.ultimo;
+  const col = ult ? autoCollegate(d, ult) : [];
+  const pagate = col.filter(u => u.paid).length, sommaCol = col.reduce((s, u) => s + u.importo, 0);
+  const prossima = col.filter(u => !u.paid).sort((a, b) => a.data < b.data ? -1 : 1)[0];
+  const n = d.notifiche || {}, uc = n.ultimo || null;
+  return aH(React.Fragment, null,
+    aH("div", { style: { ...autoCard, marginTop: 12, borderRadius: 16, padding: 16 } },
+      aH("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 } },
+        aH("div", null,
+          aH("div", { style: { fontWeight: 800, fontSize: 16 } }, (v.modello || "Auto") + (v.serie ? " · " + v.serie : "")),
+          aH("div", { style: { fontSize: 11.5, color: C.mut, marginTop: 3 } }, [v.immatricolazione ? v.immatricolazione.slice(5, 7) + "/" + v.immatricolazione.slice(0, 4) : null, v.alimentazione, v.cambio].filter(Boolean).join(" · "))),
+        aH("span", { style: { fontSize: 9, fontWeight: 700, letterSpacing: .5, color: statoLab[1], border: `1px solid ${statoLab[1]}`, borderRadius: 6, padding: "3px 6px" } }, statoLab[0])),
+      aH("div", { style: { display: "flex", alignItems: "flex-end", justifyContent: "space-between", marginTop: 14, gap: 10 } },
+        aH("div", null,
+          aH("div", { style: { fontSize: 10, color: C.mut, letterSpacing: .3 } }, "CONTACHILOMETRI"),
+          aH("div", { style: { fontFamily: "ui-monospace, monospace", fontSize: 30, fontWeight: 700, marginTop: 2 } }, autoKmIt(r.kmAtt && r.kmAtt.km), aH("span", { style: { fontSize: 14, color: C.mut } }, " km")),
+          aH("div", { style: { fontSize: 10.5, color: C.mut, marginTop: 2 } }, r.kmAtt ? "letto il " + autoDataIt(r.kmAtt.data) + (r.kmMese ? " · " + autoKmIt(r.kmMese) + " km/mese" : " · media dopo 2 mesi di letture") : "nessuna lettura")),
+        aH("button", { onClick: () => onApri({ tipo: "km" }), style: autoBtn(true) }, "Aggiorna km"))),
+
+    inc.length > 0 && aH("button", { onClick: () => setSub("costi"), style: { ...autoCard, width: "100%", textAlign: "left", marginTop: 10, cursor: "pointer", color: C.ink, background: "rgba(242,114,109,.07)", border: "1px solid rgba(242,114,109,.45)" } },
+      aH("div", { style: { fontWeight: 700, fontSize: 13, color: C.neg } }, inc.length + (inc.length === 1 ? " incoerenza" : " incoerenze") + " nel foglio USCITE"),
+      aH("div", { style: { fontSize: 11, color: C.mut, marginTop: 3 } }, inc[0].testo + (inc.length > 1 ? " · e altre" : "") + " → Costi")),
+
+    autoTitoletto("SCADENZE", aH("button", { onClick: () => onApri({ tipo: "scadenza", s: null }), style: { background: "none", border: "none", color: C.disp, fontSize: 11.5, fontWeight: 700, cursor: "pointer", minHeight: 32 } }, "+ scadenza")),
+    aH("div", { style: { display: "flex", flexDirection: "column", gap: 8 } },
+      r.scadenze.map(s => aH(AutoScadRiga, { key: s.chiave, s: s, onClick: s.tipo === "scadenza" ? () => onApri({ tipo: "scadenza", s: s.src }) : s.tipo === "piano" ? () => onApri({ tipo: "cbs" }) : null }))),
+
+    ult && aH(React.Fragment, null,
+      autoTitoletto("ULTIMO INTERVENTO"),
+      aH("button", { onClick: () => onApri({ tipo: "intervento", i: ult }), style: { ...autoCard, width: "100%", textAlign: "left", color: C.ink, cursor: "pointer", background: C.panel2 } },
+        aH("div", { style: { display: "flex", justifyContent: "space-between", gap: 8 } },
+          aH("span", { style: { fontWeight: 700, fontSize: 13.5 } }, autoEtichetta(ult)),
+          aH("span", { style: { fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 13.5, color: C.neg } }, autoEu(ult.costo))),
+        aH("div", { style: { fontSize: 11, color: C.mut, marginTop: 3 } }, [autoDataIt(ult.data), ult.km ? autoKmIt(ult.km) + " km" : null, ult.officina || null].filter(Boolean).join(" · ")),
+        col.length > 1 && aH("div", { style: { display: "flex", gap: 4, marginTop: 8 } }, col.map(u => aH("span", { key: u.row, style: { flex: u.importo, height: 5, borderRadius: 3, background: u.paid ? C.disp : C.line } }))),
+        col.length > 0 && aH("div", { style: { fontSize: 10.5, color: C.mut, marginTop: 4 } }, col.length > 1 ? "rate " + pagate + "/" + col.length + " pagate" + (prossima ? " · prossima " + autoEu(prossima.importo) + " il " + autoDataIt(prossima.data) : "") : (pagate ? "pagato" : "da pagare")),
+        col.length > 0 && Math.abs(sommaCol - ult.costo) >= 1 && aH("div", { style: { fontSize: 10.5, color: C.amber, marginTop: 2 } }, "in USCITE " + autoEu(sommaCol) + ": " + (ult.costo > sommaCol ? "mancano " + autoEu(ult.costo - sommaCol) : "ci sono " + autoEu(sommaCol - ult.costo) + " in più")))),
+
+    autoTitoletto("COSTO DELL'AUTO · " + r.costi.anno + (r.costi.previsto > 0 ? " CON PREVISTI" : "")),
+    aH("div", { style: { display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8 } },
+      aH(HeroTile, { lab: "Totale", val: autoEu(r.costi.tot), col: C.ink }),
+      aH(HeroTile, { lab: "Al mese", val: autoEu(r.costi.mensile), col: C.ink }),
+      aH(HeroTile, { lab: "Ordinario/mese", val: autoEu(r.costi.ordMensile), col: C.disp })),
+    aH("div", { style: { fontSize: 10.5, color: C.faint, marginTop: 6 } }, "Ordinario = senza interventi straordinari e bolli arretrati · dati da USCITE"),
+
+    autoTitoletto("PROMEMORIA"),
+    aH("div", { style: autoCard },
+      aH("div", { style: { fontSize: 12.5, fontWeight: 700 } }, n.trigger ? "Email e Calendar attivi" : "Promemoria non ancora attivi"),
+      aH("div", { style: { fontSize: 11, color: C.mut, marginTop: 4, lineHeight: 1.45 } },
+        n.trigger
+          ? "Controllo ogni mattina alle 7. " + (uc ? "Ultimo: " + autoDataIt(String(uc.ts || "").slice(0, 10)) + " · email " + (uc.email || 0) + " · eventi " + (uc.eventi || 0) + (uc.errori && uc.errori.length ? " · " + uc.errori.join("; ") : "") : "")
+          : "Attivali una volta: crea il controllo giornaliero, gli eventi su Google Calendar e manda le email a 30, 7 e 1 giorno dalla scadenza. Se compare un errore di permessi, segui AUTO.md."),
+      aH("div", { style: { display: "flex", gap: 8, marginTop: 10 } },
+        !n.trigger && aH("button", { onClick: () => onCall("installaTriggerAuto", null, "Promemoria attivati ✓"), style: { ...autoBtn(true), flex: 1 } }, "Attiva promemoria"),
+        aH("button", { onClick: () => onCall("autoControlloScadenze", { prova: true }, res => "Controllo fatto: email " + ((res && res.email && res.email.n) || 0) + ", eventi " + ((res && res.calendar && res.calendar.n) || 0)), style: { ...autoBtn(false), flex: 1 } }, "Controlla ora"))),
+
+    aH("div", { style: { display: "flex", gap: 8, marginTop: 14 } },
+      aH("button", { onClick: () => onApri({ tipo: "intervento", i: null }), style: { ...autoBtn(true), flex: 1 } }, "+ Intervento")));
+}
+
+function AutoStorico({ d, onApri }) {
+  const [filtro, setFiltro] = useState("TUTTI");
+  const lista = (d.interventi || []).filter(i => filtro === "TUTTI" || (i.tipi || []).indexOf(filtro) >= 0).slice().sort((a, b) => a.data < b.data ? 1 : -1);
+  const tot = (d.interventi || []).reduce((s, i) => s + (i.costo || 0), 0);
+  const perAnno = {};
+  lista.forEach(i => { const y = (i.data || "").slice(0, 4) || "—"; (perAnno[y] = perAnno[y] || []).push(i); });
+  const anni = Object.keys(perAnno).sort((a, b) => a < b ? 1 : -1);
+  const tag = t => {
+    const c = t === "STRAORDINARIO" ? C.neg : t === "REVISIONE" ? C.disp : t === "GOMME" ? C.amber : "#5B84C4";
+    return aH("span", { key: t, style: tagS(c) }, (AUTO_TIPI_LAB[t] || t).toUpperCase());
+  };
+  return aH(React.Fragment, null,
+    aH("div", { style: { padding: "16px 0 0", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 } },
+      aH("div", null,
+        aH("div", { style: { fontWeight: 800, fontSize: 18 } }, "Storico interventi"),
+        aH("div", { style: { fontSize: 11, color: C.mut, marginTop: 2 } }, (d.interventi || []).length + " registrati · totale ", aH("b", { style: { fontFamily: "ui-monospace, monospace", color: C.ink } }, autoEu(tot)))),
+      aH("button", { onClick: () => onApri({ tipo: "intervento", i: null }), style: autoBtn(true) }, "+ Intervento")),
+    aH("div", { style: { display: "flex", gap: 6, flexWrap: "wrap", marginTop: 12 } },
+      ["TUTTI"].concat(AUTO_TIPI).map(t => aH(Chip, { key: t, active: filtro === t, onClick: () => setFiltro(t) }, t === "TUTTI" ? "Tutti" : AUTO_TIPI_LAB[t]))),
+    !lista.length && aH("div", { style: { ...autoCard, marginTop: 14, color: C.mut, fontSize: 12.5 } }, "Nessun intervento con questo filtro."),
+    anni.map(y => aH(React.Fragment, { key: y },
+      autoTitoletto(y),
+      aH("div", { style: { display: "flex", flexDirection: "column", gap: 8 } }, perAnno[y].map(i => {
+        const col = autoCollegate(d, i), somma = col.reduce((s, u) => s + u.importo, 0);
+        return aH("button", { key: i.id, onClick: () => onApri({ tipo: "intervento", i: i }), style: { ...autoCard, width: "100%", textAlign: "left", color: C.ink, cursor: "pointer" } },
+          aH("div", { style: { display: "flex", gap: 6, flexWrap: "wrap" } }, (i.tipi || []).map(tag)),
+          aH("div", { style: { display: "flex", justifyContent: "space-between", gap: 8, marginTop: 8 } },
+            aH("span", { style: { fontWeight: 700, fontSize: 14 } }, autoEtichetta(i)),
+            aH("span", { style: { fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 14 } }, autoEu(i.costo))),
+          aH("div", { style: { fontFamily: "ui-monospace, monospace", fontSize: 11, color: C.mut, marginTop: 3 } }, [autoDataIt(i.data), i.km ? autoKmIt(i.km) + " km" : null, i.officina || null].filter(Boolean).join(" · ")),
+          !i.km && aH("div", { style: { fontSize: 10.5, color: C.amber, marginTop: 3 } }, "km non registrati" + (autoKmStimati(d, i.data) ? " · stima ≈ " + autoKmIt(Math.round(autoKmStimati(d, i.data) / 100) * 100) + " km" : "") + " — tocca per inserirli"),
+          (i.voci || []).length > 0 && aH("div", { style: { marginTop: 9, borderTop: `1px solid ${C.line}`, paddingTop: 8, display: "flex", flexDirection: "column", gap: 4, fontSize: 12 } },
+            i.voci.map((x, k) => aH("div", { key: k, style: { display: "flex", justifyContent: "space-between" } }, aH("span", { style: { color: C.mut } }, x.nome), aH("span", { style: { fontFamily: "ui-monospace, monospace" } }, x.importo != null ? autoEu(x.importo) : "")))),
+          i.straord > 0 && aH("div", { style: { fontSize: 10.5, color: C.faint, marginTop: 6 } }, "di cui straordinario " + autoEu(i.straord)),
+          col.length > 0 && aH("div", { style: { fontSize: 10.5, color: Math.abs(somma - i.costo) >= 1 ? C.amber : C.disp, marginTop: 6 } }, "in USCITE " + autoEu(somma) + " · " + col.length + (col.length === 1 ? " riga" : " righe") + (Math.abs(somma - i.costo) >= 1 ? " · differenza " + autoEu(i.costo - somma) : "")),
+          i.note && aH("div", { style: { fontSize: 10.5, color: C.faint, marginTop: 4 } }, i.note));
+      })))));
+}
+
+function AutoPiano({ d, r, oggi, onApri }) {
+  const voci = (d.piano || []).map(p => autoPianoVoce(p, r.kmAtt, oggi, r.kmMese));
+  const riga = v => {
+    const col = AUTO_STATO_C[v.stato] || C.mut;
+    const ignoto = v.stato === "ignoto";
+    return aH("button", { key: v.voce, onClick: () => onApri({ tipo: "voce", p: v }), style: { width: "100%", textAlign: "left", cursor: "pointer", color: C.ink, background: ignoto ? "transparent" : C.panel, border: `1px ${ignoto ? "dashed" : "solid"} ${v.stato === "presto" || v.stato === "scaduto" || v.stato === "urgente" ? col : C.line}`, borderRadius: 13, padding: "11px 12px" } },
+      aH("div", { style: { display: "flex", justifyContent: "space-between", gap: 8 } },
+        aH("span", { style: { fontWeight: 700, fontSize: 13, color: ignoto ? C.mut : C.ink } }, v.voce),
+        aH("span", { style: { fontSize: 11.5, fontWeight: 700, color: col, textAlign: "right" } }, v.testo)),
+      aH("div", { style: { fontSize: 10.5, color: C.faint, marginTop: 2 } }, [v.intervalloKm ? autoKmIt(v.intervalloKm) + " km" : null, v.intervalloMesi ? v.intervalloMesi + " mesi" : null, v.note || null].filter(Boolean).join(" · ") || (v.fonte === "CBS" ? "dal computer di bordo" : "")));
+  };
+  const cbs = voci.filter(v => v.fonte === "CBS"), altre = voci.filter(v => v.fonte !== "CBS");
+  return aH(React.Fragment, null,
+    aH("div", { style: { padding: "16px 0 0", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 } },
+      aH("div", null,
+        aH("div", { style: { fontWeight: 800, fontSize: 18 } }, "Piano manutenzione"),
+        aH("div", { style: { fontSize: 11, color: C.mut, marginTop: 2 } }, "Segue il computer di bordo (CBS)")),
+      aH("button", { onClick: () => onApri({ tipo: "cbs" }), style: autoBtn(true) }, "Copia dal CBS")),
+    autoTitoletto("COMPUTER DI BORDO"),
+    aH("div", { style: { display: "flex", flexDirection: "column", gap: 7 } }, cbs.map(riga)),
+    aH("div", { style: { fontSize: 10.5, color: C.faint, marginTop: 6 } }, "\"Tra X km\" diventa i km di scadenza: l'app ti avvisa prima."),
+    autoTitoletto("FUORI DAL CBS"),
+    aH("div", { style: { display: "flex", flexDirection: "column", gap: 7 } }, altre.map(riga)),
+    aH("button", { onClick: () => onApri({ tipo: "voce", p: null }), style: { ...autoBtn(false), width: "100%", marginTop: 10, borderStyle: "dashed", background: "transparent", color: C.mut } }, "+ Aggiungi voce"));
+}
+
+function AutoCosti({ d, inc, oggi, onApri }) {
+  const anni = autoAnni(d, oggi);
+  const [anno, setAnno] = useState(() => anni.indexOf(+oggi.slice(0, 4)) >= 0 ? +oggi.slice(0, 4) : anni[anni.length - 1]);
+  const [ignorate, setIgnorate] = useState([]);
+  useEffect(() => { stLoad("autoIgnora").then(x => { if (Array.isArray(x)) setIgnorate(x); }); }, []);
+  const ignora = id => { const nx = ignorate.concat([id]); setIgnorate(nx); stSave("autoIgnora", nx); };
+  const c = anno ? autoCostiAnno(d, anno) : null;
+  const sanz = autoSanzioniBollo(d), sanzTot = sanz.reduce((s, x) => s + x.extra, 0);
+  const pross = autoProssime(d, oggi, 365);
+  const visibili = inc.filter(x => ignorate.indexOf(x.id) < 0);
+  const classi = c ? AUTO_CLASSI.filter(k => c.per[k] > 0).sort((a, b) => c.per[b] - c.per[a]) : [];
+  const max = c ? Math.max.apply(null, classi.map(k => c.per[k]).concat([1])) : 1;
+  const COL = { Manutenzione: C.neg, Gasolio: "#5B84C4", Bollo: C.mut, Assicurazione: C.amber, Revisione: C.disp, Pedaggi: "#8A7DEF", Lavaggio: "#7FC4CD", Altro: C.faint };
+  return aH(React.Fragment, null,
+    aH("div", { style: { padding: "16px 0 0", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" } },
+      aH("div", null,
+        aH("div", { style: { fontWeight: 800, fontSize: 18 } }, "Costi auto"),
+        aH("div", { style: { fontSize: 11, color: C.mut, marginTop: 2 } }, "MACCHINA + GASOLIO da USCITE")),
+      aH("div", { style: { display: "flex", gap: 6, overflowX: "auto", overscrollBehaviorX: "contain" } }, anni.map(y => aH(Chip, { key: y, active: y === anno, onClick: () => setAnno(y) }, String(y))))),
+    !c ? aH("div", { style: { ...autoCard, marginTop: 14, color: C.mut } }, "Nessuna riga MACCHINA o GASOLIO in USCITE.")
+      : aH(React.Fragment, null,
+        aH("div", { style: { ...autoCard, marginTop: 14, borderRadius: 16, padding: 16 } },
+          aH("div", { style: { fontSize: 10, color: C.mut, letterSpacing: .3 } }, "TOTALE " + anno + (c.previsto > 0 ? " · DI CUI DA PAGARE " + autoEu(c.previsto) : "")),
+          aH("div", { style: { fontFamily: "ui-monospace, monospace", fontSize: 30, fontWeight: 700, marginTop: 2 } }, autoEu(c.tot)),
+          aH("div", { style: { display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8, marginTop: 12 } },
+            aH("div", null, aH("div", { style: { fontSize: 10, color: C.mut } }, "al mese"), aH("div", { style: { fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 14, marginTop: 2 } }, autoEu(c.mensile))),
+            aH("div", null, aH("div", { style: { fontSize: 10, color: C.mut } }, "ordinario/mese"), aH("div", { style: { fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 14, marginTop: 2, color: C.disp } }, autoEu(c.ordMensile))),
+            aH("div", null, aH("div", { style: { fontSize: 10, color: C.mut } }, "righe"), aH("div", { style: { fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 14, marginTop: 2 } }, String(c.n)))),
+          (c.straord > 0 || c.arretrati > 0) && aH("div", { style: { fontSize: 10.5, color: C.mut, marginTop: 8 } }, "Fuori dall'ordinario: " + [c.straord > 0 ? "straordinari " + autoEu(c.straord) : null, c.arretrati > 0 ? "bolli arretrati " + autoEu(c.arretrati) : null].filter(Boolean).join(" · "))),
+        autoTitoletto("DA COSA È FATTO · " + anno),
+        aH("div", { style: { ...autoCard, display: "flex", flexDirection: "column", gap: 10 } },
+          classi.map(k => aH("div", { key: k },
+            aH("div", { style: { display: "flex", justifyContent: "space-between", fontSize: 12.5 } }, aH("span", null, k), aH("span", { style: { fontFamily: "ui-monospace, monospace", fontWeight: 700 } }, autoEu(c.per[k]))),
+            aH("div", { style: { height: 7, borderRadius: 4, background: C.panel2, marginTop: 5, overflow: "hidden" } }, aH("div", { style: { width: Math.max(2, c.per[k] / max * 100) + "%", height: "100%", background: COL[k] || C.mut } }))))),
+        sanzTot > 0 && aH("div", { style: { fontSize: 11, color: C.neg, marginTop: 8 } }, "Bolli pagati in ritardo: circa " + autoEu(sanzTot) + " di sanzioni e interessi (" + sanz.filter(x => x.extra > 0).map(x => x.anno + ": +" + autoEu(x.extra)).join(", ") + ")")),
+
+    autoTitoletto("PROSSIME USCITE AUTO", aH("span", { style: { fontSize: 10.5, color: C.disp } }, "nel saldo proiettato")),
+    aH("div", { style: { ...autoCard, padding: "2px 13px" } },
+      !pross.length ? aH("div", { style: { padding: "10px 0", fontSize: 12, color: C.mut } }, "Nessuna uscita auto nei prossimi 12 mesi.")
+        : pross.slice(0, 14).map((u, k) => aH("div", { key: u.row, style: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, padding: "8px 0", borderBottom: k < Math.min(pross.length, 14) - 1 ? `1px solid ${C.line}` : "none", fontSize: 12.5 } },
+          aH("span", { style: { minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, aH("span", { style: { fontFamily: "ui-monospace, monospace", color: C.mut, display: "inline-block", width: 52 } }, autoDataIt(u.data).slice(0, 5)), u.classe + (u.nota ? " · " + u.nota.toLowerCase() : "")),
+          aH("span", { style: { fontFamily: "ui-monospace, monospace", fontWeight: 700, flex: "0 0 auto" } }, autoEu(u.importo))))),
+
+    visibili.length > 0 && aH(React.Fragment, null,
+      autoTitoletto(visibili.length + (visibili.length === 1 ? " INCOERENZA" : " INCOERENZE") + " NEL FOGLIO USCITE"),
+      aH("div", { style: { display: "flex", flexDirection: "column", gap: 8 } }, visibili.map(x => aH("div", { key: x.id, style: { ...autoCard, background: "rgba(242,114,109,.07)", border: `1px solid ${x.livello === "basso" ? C.line : "rgba(242,114,109,.45)"}` } },
+        aH("div", { style: { fontWeight: 700, fontSize: 13, color: x.livello === "basso" ? C.ink : C.neg } }, x.testo),
+        aH("div", { style: { fontSize: 11, color: C.mut, marginTop: 4, lineHeight: 1.45 } }, x.dettaglio),
+        aH("div", { style: { display: "flex", gap: 8, marginTop: 9 } },
+          x.azione && aH("button", { onClick: () => onApri({ tipo: "correggi", inc: x }), style: { ...autoBtn(false), minHeight: 40, border: `1px solid ${C.neg}`, background: "transparent", color: C.neg } }, "Correggi…"),
+          aH("button", { onClick: () => ignora(x.id), style: { ...autoBtn(false), minHeight: 40, background: "transparent", color: C.mut } }, "Ignora")))))));
+}
+
+/* ---- finestre ---- */
+function AutoKmModal({ d, onClose, onSave }) {
+  const k = autoKmAttuali(d);
+  const [data, setData] = useState(autoOggi());
+  const [km, setKm] = useState(k ? String(k.km) : "");
+  const n = Math.round(nIt(km));
+  const errore = !(n > 0) ? "Inserisci i km" : autoKmIncoerenti(d, data, n);
+  return aH(AutoSheet, { titolo: "Aggiorna km", onClose: onClose },
+    aH("div", { style: autoLbl }, "DATA"), aH("input", { type: "date", value: data, onChange: e => setData(e.target.value), style: autoInp }),
+    aH("div", { style: autoLbl }, "KM SUL CONTACHILOMETRI"), aH("input", { inputMode: "numeric", value: km, onChange: e => setKm(e.target.value), style: { ...autoInp, fontFamily: "ui-monospace, monospace", fontSize: 22 } }),
+    errore && aH("div", { style: { fontSize: 11.5, color: C.amber, marginTop: 6 } }, errore),
+    aH("button", { disabled: !!errore, onClick: () => onSave({ data: data, km: n }), style: { ...autoBtn(true), width: "100%", marginTop: 16, opacity: errore ? .5 : 1 } }, "Salva lettura"));
+}
+
+function AutoScadenzaModal({ d, s, onClose, onSave }) {
+  const nuova = !s;
+  const [km, setKm] = useState("");
+  const kmN = Math.round(nIt(km));
+  const stima = autoKmStimati(d, autoOggi()) || (autoKmAttuali(d) || {}).km;
+  const kmErr = kmN > 0 ? autoKmIncoerenti(d, autoOggi(), kmN) : "";
+  const [f, setF] = useState({ etichetta: s ? s.etichetta : "", scadenza: s ? s.scadenza : autoOggi(), importo: s && s.importo ? String(s.importo).replace(".", ",") : "", ripeti: s ? String(s.ripetiMesi || "") : "12", preavviso: s ? String(s.preavviso || 30) : "30", note: s ? s.note || "" : "" });
+  const set = (k, v) => setF(x => ({ ...x, [k]: v }));
+  const payload = extra => Object.assign({ chiave: s ? s.chiave : undefined, etichetta: f.etichetta.trim(), scadenza: f.scadenza, importo: nIt(f.importo) || 0, ripetiMesi: Math.round(nIt(f.ripeti)) || 0, preavviso: Math.round(nIt(f.preavviso)) || 30, note: f.note, km: kmN > 0 && !kmErr ? kmN : undefined, data: autoOggi() }, extra || {});
+  const ok = f.etichetta.trim() && f.scadenza;
+  const ripeti = Math.round(nIt(f.ripeti)) || 0;
+  return aH(AutoSheet, { titolo: nuova ? "Nuova scadenza" : s.etichetta, onClose: onClose },
+    nuova && aH(React.Fragment, null, aH("div", { style: autoLbl }, "NOME"), aH("input", { value: f.etichetta, onChange: e => set("etichetta", e.target.value), placeholder: "Es. Patente", style: autoInp })),
+    aH("div", { style: autoLbl }, "SCADENZA"), aH("input", { type: "date", value: f.scadenza, onChange: e => set("scadenza", e.target.value), style: autoInp }),
+    aH("div", { style: { display: "flex", gap: 8 } },
+      aH("div", { style: { flex: 1 } }, aH("div", { style: autoLbl }, "IMPORTO €"), aH("input", { inputMode: "decimal", value: f.importo, onChange: e => set("importo", e.target.value), style: autoInp })),
+      aH("div", { style: { flex: 1 } }, aH("div", { style: autoLbl }, "OGNI (MESI)"), aH("input", { inputMode: "numeric", value: f.ripeti, onChange: e => set("ripeti", e.target.value), style: autoInp })),
+      aH("div", { style: { flex: 1 } }, aH("div", { style: autoLbl }, "AVVISO (GG)"), aH("input", { inputMode: "numeric", value: f.preavviso, onChange: e => set("preavviso", e.target.value), style: autoInp }))),
+    aH("div", { style: autoLbl }, "NOTE"), aH("input", { value: f.note, onChange: e => set("note", e.target.value), style: autoInp }),
+    aH("button", { disabled: !ok, onClick: () => onSave(payload()), style: { ...autoBtn(true), width: "100%", marginTop: 16, opacity: ok ? 1 : .5 } }, "Salva"),
+    !nuova && ripeti > 0 && aH("div", { style: { ...autoCard, marginTop: 14, background: C.panel2 } },
+      aH("div", { style: { fontWeight: 700, fontSize: 13 } }, "L'hai rinnovata?"),
+      aH("div", { style: { ...autoLbl, marginTop: 8 } }, "KM DI OGGI (dal contachilometri)"),
+      aH("input", { inputMode: "numeric", value: km, placeholder: stima ? "≈ " + autoKmIt(Math.round(stima / 100) * 100) : "", onChange: e => setKm(e.target.value), style: { ...autoInp, fontFamily: "ui-monospace, monospace" } }),
+      kmErr && aH("div", { style: { fontSize: 11.5, color: C.amber, marginTop: 6 } }, kmErr),
+      aH("button", { disabled: !(kmN > 0) || !!kmErr, onClick: () => onSave(payload({ rinnova: true })), style: { ...autoBtn(false), width: "100%", marginTop: 10, opacity: kmN > 0 && !kmErr ? 1 : .5 } }, "Rinnovata ✓ — sposta di " + ripeti + " mesi (" + autoDataIt(autoPiuMesi(f.scadenza, ripeti)) + ")")),
+    !nuova && ["RCA", "BOLLO", "REVISIONE"].indexOf(s.chiave) < 0 && aH("button", { onClick: () => onSave({ chiave: s.chiave, elimina: true }), style: { ...autoBtn(false), width: "100%", marginTop: 8, color: C.neg, background: "transparent" } }, "Elimina scadenza"));
+}
+
+function AutoCbsModal({ d, onClose, onSave }) {
+  const k = autoKmAttuali(d);
+  const cbs = (d.piano || []).filter(p => p.fonte === "CBS");
+  const [km, setKm] = useState(k ? String(k.km) : "");
+  const [v, setV] = useState(() => { const o = {}; cbs.forEach(p => { o[p.voce] = { traKm: "", entro: "" }; }); return o; });
+  const set = (voce, campo, x) => setV(o => ({ ...o, [voce]: { ...o[voce], [campo]: x } }));
+  const n = Math.round(nIt(km));
+  const kmErr = !(n > 0) ? "Inserisci i km di oggi" : autoKmIncoerenti(d, autoOggi(), n);
+  const save = () => { if (!kmErr) onSave({ km: n, data: autoOggi(), righe: cbs.map(p => ({ voce: p.voce, traKm: Math.round(nIt(v[p.voce].traKm)) || undefined, entro: v[p.voce].entro || undefined })).filter(x => x.traKm != null || x.entro) }); };
+  return aH(AutoSheet, { titolo: "Copia dal computer di bordo", onClose: onClose },
+    aH("div", { style: { fontSize: 11.5, color: C.mut, marginTop: 6, lineHeight: 1.45 } }, "Sul cruscotto: menu Veicolo → Stato del veicolo (Service). Scrivi solo le voci che vedi; le altre restano come sono."),
+    aH("div", { style: autoLbl }, "KM ATTUALI"), aH("input", { inputMode: "numeric", value: km, onChange: e => setKm(e.target.value), style: { ...autoInp, fontFamily: "ui-monospace, monospace" } }),
+    cbs.map(p => aH("div", { key: p.voce },
+      aH("div", { style: autoLbl }, p.voce.toUpperCase()),
+      aH("div", { style: { display: "flex", gap: 8 } },
+        aH("input", { inputMode: "numeric", placeholder: "tra … km", value: v[p.voce].traKm, onChange: e => set(p.voce, "traKm", e.target.value), style: { ...autoInp, flex: 1 } }),
+        aH("input", { type: "month", value: v[p.voce].entro, onChange: e => set(p.voce, "entro", e.target.value), style: { ...autoInp, flex: 1 } })))),
+    kmErr && aH("div", { style: { fontSize: 11.5, color: C.amber, marginTop: 8 } }, kmErr),
+    aH("button", { disabled: !!kmErr, onClick: save, style: { ...autoBtn(true), width: "100%", marginTop: 16, opacity: kmErr ? .5 : 1 } }, "Salva valori"));
+}
+
+function AutoVoceModal({ p, onClose, onSave }) {
+  const nuova = !p;
+  const s = x => x == null || x === "" ? "" : String(x);
+  const [f, setF] = useState({ voce: p ? p.voce : "", fonte: p ? p.fonte : "MANUALE", intervalloKm: s(p && p.intervalloKm), intervalloMesi: s(p && p.intervalloMesi), ultimoKm: s(p && p.ultimoKm), ultimaData: p ? p.ultimaData || "" : "", kmScad: s(p && p.kmScad), dataScad: p ? p.dataScad || "" : "", note: p ? p.note || "" : "" });
+  const set = (k, v) => setF(x => ({ ...x, [k]: v }));
+  const num = x => { const n = Math.round(nIt(x)); return n > 0 ? n : ""; };
+  const save = extra => onSave({ righe: [Object.assign({ voce: f.voce.trim(), fonte: f.fonte, intervalloKm: num(f.intervalloKm), intervalloMesi: num(f.intervalloMesi), ultimoKm: num(f.ultimoKm), ultimaData: f.ultimaData, kmScad: num(f.kmScad), dataScad: f.dataScad, note: f.note, nuova: nuova }, extra || {})] });
+  const campo = (lab, k, tipo) => aH("div", { style: { flex: 1, minWidth: 0 } }, aH("div", { style: autoLbl }, lab), aH("input", { type: tipo || "text", inputMode: tipo ? undefined : "numeric", value: f[k], onChange: e => set(k, e.target.value), style: autoInp }));
+  return aH(AutoSheet, { titolo: nuova ? "Nuova voce del piano" : f.voce, onClose: onClose },
+    nuova && aH(React.Fragment, null, aH("div", { style: autoLbl }, "VOCE"), aH("input", { value: f.voce, onChange: e => set("voce", e.target.value), placeholder: "Es. Cinghia servizi", style: autoInp })),
+    aH("div", { style: { display: "flex", gap: 6, marginTop: 12 } }, ["CBS", "MANUALE"].map(x => aH(Chip, { key: x, active: f.fonte === x, onClick: () => set("fonte", x) }, x === "CBS" ? "Computer di bordo" : "Intervallo mio"))),
+    aH("div", { style: { display: "flex", gap: 8 } }, campo("OGNI KM", "intervalloKm"), campo("OGNI MESI", "intervalloMesi")),
+    aH("div", { style: { display: "flex", gap: 8 } }, campo("ULTIMO A KM", "ultimoKm"), campo("ULTIMA DATA", "ultimaData", "date")),
+    aH("div", { style: { display: "flex", gap: 8 } }, campo("SCADE A KM", "kmScad"), campo("SCADE IL", "dataScad", "date")),
+    aH("div", { style: { fontSize: 10.5, color: C.faint, marginTop: 6 } }, "Se \"scade\" è vuoto si calcola da ultimo + intervallo."),
+    aH("div", { style: autoLbl }, "NOTE"), aH("input", { value: f.note, onChange: e => set("note", e.target.value), style: autoInp }),
+    aH("button", { disabled: !f.voce.trim(), onClick: () => save(), style: { ...autoBtn(true), width: "100%", marginTop: 16 } }, "Salva"),
+    !nuova && aH("button", { onClick: () => save({ elimina: true }), style: { ...autoBtn(false), width: "100%", marginTop: 8, color: C.neg, background: "transparent" } }, "Elimina voce"));
+}
+
+/* Le rate si dividono in parti uguali; i centesimi che avanzano vanno
+   sull'ultima, cosi' la somma e' ESATTAMENTE il costo. */
+function autoRate(costo, n, prima, ogniMesi) {
+  const out = [], c = Math.round((costo || 0) * 100), k = Math.max(1, Math.min(36, n || 1));
+  const base = Math.floor(c / k);
+  for (let i = 0; i < k; i++) out.push({ data: autoPiuMesi(prima, i * (ogniMesi || 1)), importo: String(((i === k - 1 ? c - base * (k - 1) : base) / 100).toFixed(2)).replace(".", ",") });
+  return out;
+}
+
+function AutoInterventoModal({ d, i, onClose, onSave, onDelete }) {
+  const nuovo = !i;
+  const piano = (d.piano || []).map(p => p.voce);
+  const officine = Array.from(new Set((d.interventi || []).map(x => x.officina).filter(Boolean)));
+  const kAtt = autoKmAttuali(d);
+  const s = x => x == null || x === "" ? "" : String(x).replace(".", ",");
+  const [tipi, setTipi] = useState(i ? i.tipi.slice() : ["TAGLIANDO"]);
+  const [data, setData] = useState(i ? i.data : autoOggi());
+  const [km, setKm] = useState(i ? s(i.km) : kAtt ? String(kAtt.km) : "");
+  const [officina, setOfficina] = useState(i ? i.officina || "" : "");
+  const [voci, setVoci] = useState(() => (i ? i.voci : []).map(v => ({ nome: v.nome, importo: s(v.importo) })));
+  const [costo, setCosto] = useState(i ? s(i.costo) : "");
+  const [straord, setStraord] = useState(i ? s(i.straord) : "");
+  const [note, setNote] = useState(i ? i.note || "" : "");
+  const [modo, setModo] = useState("UNICA");
+  const [pay, setPay] = useState("conto");
+  const [dataPag, setDataPag] = useState(i ? i.data : autoOggi());
+  const [nRate, setNRate] = useState("4");
+  const [rate, setRate] = useState(null);
+  const [olioTra, setOlioTra] = useState("");
+  const [confirmDel, setConfirmDel] = useState(false);
+  const toggleTipo = t => setTipi(x => x.indexOf(t) >= 0 ? x.filter(y => y !== t) : x.concat([t]));
+  const haVoce = n => voci.some(v => v.nome.toUpperCase() === n.toUpperCase());
+  const toggleVoce = n => setVoci(x => haVoce(n) ? x.filter(v => v.nome.toUpperCase() !== n.toUpperCase()) : x.concat([{ nome: n, importo: "" }]));
+  const setVoce = (k, campo, v) => setVoci(x => x.map((y, j) => j === k ? { ...y, [campo]: v } : y));
+  const sommaVoci = voci.reduce((t, v) => t + (nIt(v.importo) || 0), 0);
+  const costoN = nIt(costo) > 0 ? nIt(costo) : sommaVoci;
+  const rateN = rate || autoRate(costoN, Math.round(nIt(nRate)) || 1, dataPag, 1);
+  const sommaRate = rateN.reduce((t, r) => t + (nIt(r.importo) || 0), 0);
+  const rateOk = modo !== "RATE" || Math.abs(sommaRate - costoN) < 0.01;
+  const kmN = Math.round(nIt(km));
+  const kmStima = autoKmStimati(d, data);
+  const kmErr = kmN > 0 ? autoKmIncoerenti(d, data, kmN, i ? i.id : undefined) : nuovo ? "Mancano i km (li trovi in fattura o sul contachilometri)" : "";
+  const errore = !tipi.length ? "Scegli almeno un tipo" : !data ? "Manca la data" : kmErr ? kmErr : !(costoN >= 0) ? "Costo non valido" : !rateOk ? "Le rate sommano " + autoEu(sommaRate) + ", il costo è " + autoEu(costoN) : "";
+  const save = () => {
+    if (errore) return;
+    const p = { id: i ? i.id : undefined, data: data, km: kmN > 0 ? kmN : null, tipi: tipi, officina: officina.trim(), costo: Math.round(costoN * 100) / 100, straord: nIt(straord) > 0 ? nIt(straord) : 0, note: note.trim(), voci: voci.filter(v => v.nome.trim()).map(v => ({ nome: v.nome.trim(), importo: nIt(v.importo) >= 0 ? nIt(v.importo) : null })) };
+    if (nuovo) p.uscite = { modo: costoN > 0 ? modo : "NESSUNA", pay: pay, rate: modo === "RATE" ? rateN.map(r => ({ data: r.data, importo: nIt(r.importo) })) : modo === "UNICA" ? [{ data: dataPag, importo: costoN }] : [] };
+    if (nIt(olioTra) > 0) p.cbs = [{ voce: "Olio motore", traKm: Math.round(nIt(olioTra)) }];
+    onSave(p);
+  };
+  const extra = voci.filter(v => piano.map(x => x.toUpperCase()).indexOf(v.nome.toUpperCase()) < 0);
+  return aH(AutoSheet, { titolo: nuovo ? "Nuovo intervento" : "Modifica intervento", onClose: onClose },
+    aH("div", { style: autoLbl }, "TIPO (anche più di uno)"),
+    aH("div", { style: { display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 6, marginTop: 6 } }, AUTO_TIPI.map(t => aH("button", { key: t, onClick: () => toggleTipo(t), style: { minHeight: 40, borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: "pointer", background: tipi.indexOf(t) >= 0 ? C.panel2 : C.panel, color: tipi.indexOf(t) >= 0 ? C.disp : C.mut, border: `1px solid ${tipi.indexOf(t) >= 0 ? C.disp : C.line}` } }, AUTO_TIPI_LAB[t]))),
+    aH("div", { style: { display: "flex", gap: 8 } },
+      aH("div", { style: { flex: 1 } }, aH("div", { style: autoLbl }, "DATA"), aH("input", { type: "date", value: data, onChange: e => { setData(e.target.value); if (nuovo) { setDataPag(e.target.value); setRate(null); } }, style: autoInp })),
+      aH("div", { style: { flex: 1 } }, aH("div", { style: autoLbl }, "KM *"), aH("input", { inputMode: "numeric", value: km, placeholder: kmStima ? "≈ " + autoKmIt(Math.round(kmStima / 100) * 100) : "", onChange: e => setKm(e.target.value), style: { ...autoInp, fontFamily: "ui-monospace, monospace", borderColor: kmErr ? C.amber : C.line } }))),
+    kmErr && aH("div", { style: { fontSize: 11, color: C.amber, marginTop: 5 } }, kmErr),
+    aH("div", { style: autoLbl }, "OFFICINA"),
+    aH("input", { list: "auto-off", value: officina, onChange: e => setOfficina(e.target.value), style: autoInp }),
+    aH("datalist", { id: "auto-off" }, officine.map(o => aH("option", { key: o, value: o }))),
+
+    aH("div", { style: autoLbl }, "VOCI ESEGUITE · aggiornano il Piano"),
+    aH("div", { style: { display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 } }, piano.map(n => aH(Chip, { key: n, active: haVoce(n), onClick: () => toggleVoce(n) }, n))),
+    voci.length > 0 && aH("div", { style: { display: "flex", flexDirection: "column", gap: 6, marginTop: 8 } }, voci.map((v, k) => aH("div", { key: k, style: { display: "flex", gap: 6, alignItems: "center" } },
+      aH("input", { value: v.nome, onChange: e => setVoce(k, "nome", e.target.value), style: { ...autoInp, marginTop: 0, flex: 2 } }),
+      aH("input", { inputMode: "decimal", placeholder: "€", value: v.importo, onChange: e => setVoce(k, "importo", e.target.value), style: { ...autoInp, marginTop: 0, flex: 1, fontFamily: "ui-monospace, monospace" } }),
+      aH("button", { onClick: () => setVoci(x => x.filter((y, j) => j !== k)), "aria-label": "Togli voce", style: { ...autoBtn(false), minHeight: 40, padding: "0 10px", color: C.mut } }, "✕")))),
+    aH("button", { onClick: () => setVoci(x => x.concat([{ nome: "", importo: "" }])), style: { ...autoBtn(false), width: "100%", marginTop: 8, borderStyle: "dashed", background: "transparent", color: C.mut, minHeight: 40 } }, "+ altra voce (manodopera, pastiglie…)"),
+    extra.length > 0 && aH("div", { style: { fontSize: 10.5, color: C.faint, marginTop: 4 } }, "Le voci fuori dal piano restano solo nello storico."),
+
+    aH("div", { style: { display: "flex", gap: 8 } },
+      aH("div", { style: { flex: 1 } }, aH("div", { style: autoLbl }, "COSTO TOTALE €"), aH("input", { inputMode: "decimal", value: costo, placeholder: sommaVoci > 0 ? String(sommaVoci).replace(".", ",") : "0", onChange: e => { setCosto(e.target.value); setRate(null); }, style: { ...autoInp, fontFamily: "ui-monospace, monospace", fontSize: 18 } })),
+      aH("div", { style: { flex: 1 } }, aH("div", { style: autoLbl }, "DI CUI STRAORD. €"), aH("input", { inputMode: "decimal", value: straord, onChange: e => setStraord(e.target.value), style: { ...autoInp, fontFamily: "ui-monospace, monospace", fontSize: 18 } }))),
+    aH("div", { style: { fontSize: 10.5, color: C.faint, marginTop: 4 } }, "Straordinario = la parte che non si ripete (es. la catena): non entra nel costo ordinario."),
+
+    nuovo && aH("div", { style: { ...autoCard, marginTop: 14, background: C.panel2 } },
+      aH("div", { style: { fontWeight: 700, fontSize: 13 } }, "Registra in USCITE (MACCHINA)"),
+      aH("div", { style: { display: "flex", gap: 6, marginTop: 8 } }, [["UNICA", "Unica"], ["RATE", "A rate"], ["NESSUNA", "Già inserita"]].map(([k, t]) => aH(Chip, { key: k, active: modo === k, onClick: () => setModo(k) }, t))),
+      modo !== "NESSUNA" && aH("div", { style: { display: "flex", gap: 6, marginTop: 8 } }, [["conto", "Conto"], ["cc", "Carta"]].map(([k, t]) => aH(Chip, { key: k, active: pay === k, onClick: () => setPay(k) }, t))),
+      modo === "UNICA" && aH(React.Fragment, null, aH("div", { style: autoLbl }, "DATA PAGAMENTO"), aH("input", { type: "date", value: dataPag, onChange: e => setDataPag(e.target.value), style: autoInp })),
+      modo === "RATE" && aH(React.Fragment, null,
+        aH("div", { style: { display: "flex", gap: 8 } },
+          aH("div", { style: { flex: 1 } }, aH("div", { style: autoLbl }, "N. RATE"), aH("input", { inputMode: "numeric", value: nRate, onChange: e => { setNRate(e.target.value); setRate(null); }, style: autoInp })),
+          aH("div", { style: { flex: 2 } }, aH("div", { style: autoLbl }, "PRIMA RATA"), aH("input", { type: "date", value: dataPag, onChange: e => { setDataPag(e.target.value); setRate(null); }, style: autoInp }))),
+        aH("div", { style: { display: "flex", flexDirection: "column", gap: 6, marginTop: 8 } }, rateN.map((r, k) => aH("div", { key: k, style: { display: "flex", gap: 6 } },
+          aH("input", { type: "date", value: r.data, onChange: e => setRate(rateN.map((x, j) => j === k ? { ...x, data: e.target.value } : x)), style: { ...autoInp, marginTop: 0, flex: 3 } }),
+          aH("input", { inputMode: "decimal", value: r.importo, onChange: e => setRate(rateN.map((x, j) => j === k ? { ...x, importo: e.target.value } : x)), style: { ...autoInp, marginTop: 0, flex: 2, fontFamily: "ui-monospace, monospace" } })))),
+        aH("div", { style: { fontSize: 11, marginTop: 6, color: rateOk ? C.disp : C.amber } }, "Somma rate " + autoEu(sommaRate) + (rateOk ? " ✓" : " — deve fare " + autoEu(costoN))))),
+
+    tipi.indexOf("TAGLIANDO") >= 0 && aH(React.Fragment, null,
+      aH("div", { style: autoLbl }, "COMPUTER DI BORDO DOPO IL TAGLIANDO: OLIO TRA (KM)"),
+      aH("input", { inputMode: "numeric", value: olioTra, onChange: e => setOlioTra(e.target.value), placeholder: "facoltativo", style: { ...autoInp, fontFamily: "ui-monospace, monospace" } })),
+    aH("div", { style: autoLbl }, "NOTE"), aH("input", { value: note, onChange: e => setNote(e.target.value), style: autoInp }),
+    errore && aH("div", { style: { fontSize: 11.5, color: C.amber, marginTop: 8 } }, errore),
+    aH("button", { disabled: !!errore, onClick: save, style: { ...autoBtn(true), width: "100%", marginTop: 14, minHeight: 50, fontSize: 15, opacity: errore ? .5 : 1 } }, nuovo ? "Salva intervento" : "Salva modifiche"),
+    !nuovo && (!confirmDel
+      ? aH("button", { onClick: () => setConfirmDel(true), style: { ...autoBtn(false), width: "100%", marginTop: 8, color: C.neg, background: "transparent" } }, "Elimina intervento")
+      : aH("div", { style: { ...autoCard, marginTop: 8, border: `1px solid ${C.neg}` } },
+        aH("div", { style: { fontSize: 12, color: C.ink } }, "Tolgo l'intervento dallo storico. Le righe in USCITE restano: se vanno tolte, fallo da Movimenti."),
+        aH("button", { onClick: () => onDelete(i), style: { ...autoBtn(false), width: "100%", marginTop: 8, border: `1px solid ${C.neg}`, color: C.neg, background: "transparent" } }, "Sì, elimina"))));
+}
+
+function AutoCorreggiModal({ inc, onClose, onConferma }) {
+  const a = inc.azione;
+  const righe = a.tipo === "crea"
+    ? a.righe.map(r => "Crea in USCITE: " + autoDataIt(r.data) + " · " + autoEu(r.importo) + " · MACCHINA · " + r.nota + " · DA PAGARE")
+    : a.tipo === "date"
+      ? a.righe.map(r => "Riga " + r.row + ": " + (r.da && r.da !== r.data ? autoDataIt(r.da) + " → " + autoDataIt(r.data) : "ANNO/MESE → " + autoMeseIt(r.data)) + " (" + autoEu(r.importo) + ")")
+      : a.righe.map(r => "Riga " + r.row + " (" + autoEu(r.importo) + "): PAGATA → DA PAGARE");
+  return aH(AutoSheet, { titolo: "Correggi USCITE", onClose: onClose },
+    aH("div", { style: { fontSize: 13, fontWeight: 700, marginTop: 8 } }, inc.testo),
+    aH("div", { style: { fontSize: 11.5, color: C.mut, marginTop: 4 } }, inc.dettaglio),
+    aH("div", { style: autoLbl }, "COSA SCRIVO NEL FOGLIO"),
+    aH("div", { style: { ...autoCard, marginTop: 6, background: C.panel2, display: "flex", flexDirection: "column", gap: 5, fontSize: 12, fontFamily: "ui-monospace, monospace" } }, righe.map((t, k) => aH("div", { key: k }, t))),
+    aH("div", { style: { fontSize: 10.5, color: C.faint, marginTop: 6 } }, "Ogni riga viene ricontrollata prima di scrivere: se nel frattempo è cambiata, mi fermo."),
+    aH("button", { onClick: () => onConferma(a), style: { ...autoBtn(true), width: "100%", marginTop: 14 } }, "Conferma e scrivi"));
+}
+
+function AutoModali({ m, auto, onClose, onCall }) {
+  if (!m || !auto) return null;
+  if (m.tipo === "km") return aH(AutoKmModal, { d: auto, onClose: onClose, onSave: p => onCall("autoSalvaKm", p, "Km salvati ✓") });
+  if (m.tipo === "scadenza") return aH(AutoScadenzaModal, { d: auto, s: m.s, onClose: onClose, onSave: p => onCall("autoSalvaScadenza", p, p.elimina ? "Scadenza eliminata ✓" : p.rinnova ? "Scadenza rinnovata ✓" : "Scadenza salvata ✓") });
+  if (m.tipo === "cbs") return aH(AutoCbsModal, { d: auto, onClose: onClose, onSave: p => onCall("autoSalvaPiano", p, "Valori del computer di bordo salvati ✓") });
+  if (m.tipo === "voce") return aH(AutoVoceModal, { p: m.p, onClose: onClose, onSave: p => onCall("autoSalvaPiano", p, "Piano aggiornato ✓") });
+  if (m.tipo === "intervento") return aH(AutoInterventoModal, { d: auto, i: m.i, onClose: onClose, onSave: p => onCall("autoSalvaIntervento", p, res => "Intervento salvato ✓" + (res && res.righeUscite ? " · " + res.righeUscite + (res.righeUscite === 1 ? " riga" : " righe") + " in USCITE" : "")), onDelete: i => onCall("autoEliminaIntervento", { id: i.id }, "Intervento eliminato ✓") });
+  if (m.tipo === "correggi") return aH(AutoCorreggiModal, { inc: m.inc, onClose: onClose, onConferma: a => onCall("autoCorreggi", a, res => "USCITE corretta ✓ (" + ((res && res.righe) || 0) + (res && res.righe === 1 ? " riga)" : " righe)")) });
+  return null;
+}
+
+function TabBar({ tab, setTab, badge }) {
+  /* Sette voci. Con l'etichetta a 10,5px sei voci misuravano 322px su uno
+     schermo da 320 e "Movimenti" veniva tagliata: la barra e' `position:fixed`,
+     quindi il taglio non produce nemmeno uno scorrimento che lo denunci.
+     Con la settima (Auto) "Analisi Spese" diventa "Analisi": a 8,5px la fila
+     sta in ~300px anche su un telefono da 320. Il pallino conta le scadenze
+     dell'auto entro il loro preavviso. */
+  const items = [["home", "Panoramica", "▤"], ["analisi", "Analisi", "◵"], ["add", "Aggiungi", "＋"], ["ia", "Chiedi", "✦"], ["bollette", "Bollette", "⚡"], ["auto", "Auto", "🚗"], ["list", "Movimenti", "≣"]];
+  const b = badge || {};
+  return React.createElement("div", { style: { position: "fixed", bottom: 0, left: 0, right: 0, background: "rgba(14,22,32,.92)", backdropFilter: "blur(8px)", borderTop: `1px solid ${C.line}` } }, React.createElement("div", { style: { maxWidth: 480, margin: "0 auto", display: "flex" } }, items.map(([k, t, ic]) => React.createElement("button", { key: k, onClick: () => setTab(k), "aria-label": b[k] ? t + ", " + b[k] + " avvisi" : t, style: { flex: 1, minWidth: 0, background: "none", border: "none", cursor: "pointer", padding: "12px 0 16px", color: tab === k ? C.disp : C.mut, display: "flex", flexDirection: "column", alignItems: "center", gap: 3 } }, React.createElement("span", { style: { fontSize: 20, lineHeight: 1, position: "relative" } }, ic, b[k] > 0 && React.createElement("span", { style: { position: "absolute", top: -4, right: -9, minWidth: 15, height: 15, borderRadius: 8, background: C.amber, color: "#08131C", fontSize: 9, fontWeight: 800, lineHeight: "15px", textAlign: "center", padding: "0 3px" } }, b[k])), React.createElement("span", { style: { fontSize: 8.5, fontWeight: 600, letterSpacing: .1, whiteSpace: "nowrap" } }, t)))));
 }
 
 try {

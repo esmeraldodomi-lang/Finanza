@@ -1,6 +1,6 @@
 /*******************************************************************
  * GESTIONE FINANZIARIA — ENDPOINT GOOGLE SHEETS (Apps Script)
- * Bollette · Riscaldamento · Entrate · Uscite
+ * Bollette · Riscaldamento · Entrate · Uscite · Auto
  *
  * REGOLA DI DIAGNOSI (perché questo file è cambiato):
  * l'app restava ferma su "Carico i dati dal foglio…". Un caricamento che
@@ -136,7 +136,7 @@ function cachePut_(n, obj) {
 }
 function cacheClear_() {
   try {
-    var nomi = ['finanze', 'bollette', 'risc', 'entrate'], tutte = [];
+    var nomi = ['finanze', 'bollette', 'risc', 'entrate', 'auto'], tutte = [];
     for (var k = 0; k < nomi.length; k++) {
       tutte.push(cacheK_(nomi[k]));
       for (var i = 0; i < CACHE_MAX_PEZZI; i++) tutte.push(cacheK_(nomi[k]) + '_' + i);
@@ -1242,6 +1242,568 @@ function salvaEntrata(p) {
     return err_(e, 'salvaEntrata');
   } finally {
     try { lock.releaseLock(); } catch (el) {}
+  }
+}
+
+/* ================================================================
+ * AUTO — manutenzione, scadenze e costi dell'auto (spec: AUTO.md)
+ * ================================================================
+ * I SOLDI RESTANO IN USCITE. I fogli AUTO_* tengono solo quello che USCITE
+ * non sa: km, voci, officina, scadenze, piano. Le righe MACCHINA e GASOLIO
+ * si leggono da USCITE e si classificano nel client (AUTO:CORE). Quando un
+ * intervento si paga dall'app, le righe in USCITE portano "[AUTO-0007]"
+ * nella nota: e' il legame, senza aggiungere colonne al foglio.
+ *
+ * I fogli AUTO_* si creano da soli alla prima lettura, con i dati di
+ * partenza qui sotto: se esistono gia' non vengono toccati.
+ *
+ * Promemoria: autoControlloScadenze() gira ogni mattina (installaTriggerAuto
+ * una volta sola), manda un'email alle soglie e tiene allineati gli eventi
+ * su Google Calendar. Servono gli scope script.send_mail, calendar,
+ * script.scriptapp e userinfo.email (AUTO.md, "Attivare i promemoria").
+ */
+var AUTO_FOGLI = {
+  interventi: { nome: 'AUTO_INTERVENTI', H: ['ID', 'DATA', 'KM', 'TIPO', 'VOCI', 'OFFICINA', 'COSTO', 'STRAORDINARIO', 'PAGAMENTO', 'NOTE'] },
+  km: { nome: 'AUTO_KM', H: ['DATA', 'KM', 'FONTE'] },
+  scadenze: { nome: 'AUTO_SCADENZE', H: ['CHIAVE', 'ETICHETTA', 'SCADENZA', 'IMPORTO', 'RIPETI_MESI', 'PREAVVISO_GG', 'NOTE'] },
+  piano: { nome: 'AUTO_PIANO', H: ['VOCE', 'FONTE', 'INTERVALLO_KM', 'INTERVALLO_MESI', 'ULTIMO_KM', 'ULTIMA_DATA', 'KM_SCAD', 'DATA_SCAD', 'NOTE'] }
+};
+var AUTO_VEICOLO = { modello: 'BMW 118d', serie: 'F20', immatricolazione: '2013-12', alimentazione: 'Diesel', cambio: 'Automatico' };
+var AUTO_CATEGORIE = ['MACCHINA', 'GASOLIO'];
+var AUTO_TIPI_ = ['TAGLIANDO', 'REVISIONE', 'STRAORDINARIO', 'GOMME', 'CARROZZERIA', 'ALTRO'];
+/* Dati di partenza: quelli raccolti a ottobre 2026. Le date senza giorno
+   certo lo dicono nella nota: un valore messo per comodita' deve vedersi. */
+var AUTO_SEED = {
+  interventi: [
+    ['AUTO-0001', '2024-08-02', 155000, 'GOMME', 'Pneumatici=380', 'Amuro Gomme', 380, 0, 'UNICA', 'Cambio gomme estive (montate tutto l\'anno)'],
+    ['AUTO-0002', '2025-12-01', '', 'REVISIONE', 'Revisione=80', '', 80, 0, 'UNICA', 'Fatta a dicembre 2025 (giorno non registrato), pagata a gennaio 2026'],
+    ['AUTO-0003', '2026-09-11', 180000, 'TAGLIANDO,STRAORDINARIO', 'Olio motore=300; Catena distribuzione=2100', '', 2400, 2100, 'RATE', 'Fattura 2.400 €, pagata a rate']
+  ],
+  km: [['2026-10-18', 180100, 'MANUALE']],
+  scadenze: [
+    ['RCA', 'Assicurazione RCA', '2026-11-21', 450, 12, 45, 'Niente tacito rinnovo: confronta i preventivi'],
+    ['BOLLO', 'Bollo', '2026-12-31', 300, 12, 30, 'In ritardo costa: 2023 e 2024 pagati con sanzioni'],
+    ['REVISIONE', 'Revisione', '2027-12-31', 80, 24, 60, 'Ogni 24 mesi, entro fine mese']
+  ],
+  piano: [
+    ['Olio motore', 'CBS', '', '', 180000, '2026-09-11', '', '', 'Il tagliando: segue il computer di bordo'],
+    ['Liquido freni', 'CBS', '', '', '', '', '', '', ''],
+    ['Pastiglie anteriori', 'CBS', '', '', '', '', '', '', ''],
+    ['Pastiglie posteriori', 'CBS', '', '', '', '', '', '', ''],
+    ['Controllo veicolo', 'CBS', '', '', '', '', '', '', ''],
+    ['Catena distribuzione', 'MANUALE', '', '', 180000, '2026-09-11', '', '', 'Rumori a freddo: segnalali al tagliando'],
+    ['Olio cambio automatico', 'MANUALE', 100000, '', '', '', '', '', 'BMW: a vita · ZF consiglia 80-120 mila km'],
+    ['Pneumatici', 'MANUALE', '', 72, '', '2024-08-02', '', '', 'Estivi tutto l\'anno: oltre 6 anni la gomma indurisce'],
+    ['Liquido refrigerante', 'MANUALE', '', 48, '', '', '', '', ''],
+    ['Batteria', 'MANUALE', '', '', '', '', '', '', 'AGM: alla sostituzione va registrata in centralina']
+  ]
+};
+
+/* ---- date ISO e numeri ---- */
+function autoD_(iso) { var m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null; }
+function autoIso_(d) { return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2); }
+function autoOggi_() { return iso_(new Date()); }
+function autoGiorni_(da, a) { var x = autoD_(da), y = autoD_(a); return (x && y) ? Math.round((y - x) / 86400000) : null; }
+function autoFineMese_(iso) { var d = autoD_(iso); return d ? autoIso_(new Date(d.getFullYear(), d.getMonth() + 1, 0)) : ''; }
+function autoPiuMesi_(iso, n) {
+  var d = autoD_(iso); if (!d) return '';
+  var fineMese = d.getDate() === new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+  var t = new Date(d.getFullYear(), d.getMonth() + n, 1);
+  var ult = new Date(t.getFullYear(), t.getMonth() + 1, 0).getDate();
+  return autoIso_(new Date(t.getFullYear(), t.getMonth(), fineMese ? ult : Math.min(d.getDate(), ult)));
+}
+function autoDataIt_(iso) { var d = autoD_(iso); return d ? ('0' + d.getDate()).slice(-2) + '/' + ('0' + (d.getMonth() + 1)).slice(-2) + '/' + d.getFullYear() : ''; }
+/* "€ 1.234,50" come testo, 1234.5 come numero: tutti e due valgono. */
+function autoNum_(v) {
+  if (v === '' || v == null) return null;
+  if (typeof v === 'number') return isFinite(v) ? r2_(v) : null;
+  var s = String(v).replace(/[€\s]/g, '');
+  if (!s || s.charAt(0) === '#') return null;
+  if (s.indexOf(',') >= 0) s = s.replace(/\./g, '').replace(',', '.');
+  var n = parseFloat(s); return isFinite(n) ? r2_(n) : null;
+}
+function autoInt_(v) { var n = autoNum_(v); return n == null ? null : Math.round(n); }
+
+/* ---- fogli ---- */
+function autoFoglio_(ss, k, crea) {
+  var def = AUTO_FOGLI[k];
+  var sh = ss.getSheetByName(def.nome);
+  if (!sh && crea) {
+    /* due aperture in contemporanea al primo avvio: la seconda trova il
+       foglio appena creato dalla prima invece di fallire */
+    try { sh = ss.insertSheet(def.nome); } catch (e) { sh = ss.getSheetByName(def.nome); if (sh) return sh; throw e; }
+    var righe = [def.H.slice()];
+    (AUTO_SEED[k] || []).forEach(function (r) { var x = r.slice(); while (x.length < def.H.length) x.push(''); righe.push(x); });
+    sh.getRange(1, 1, righe.length, def.H.length).setValues(righe);
+    try { sh.setFrozenRows(1); } catch (e) {}
+  }
+  return sh;
+}
+function autoFogli_(ss) { var o = {}; for (var k in AUTO_FOGLI) o[k] = autoFoglio_(ss, k, true); return o; }
+/* Righe come oggetti con le chiavi = intestazioni MAIUSCOLE. */
+function autoLeggi_(sh) {
+  if (!sh) return [];
+  var v = sh.getDataRange().getValues(); if (v.length < 2) return [];
+  var H = v[0].map(function (h) { return up_(h); }), out = [];
+  for (var r = 1; r < v.length; r++) {
+    var o = { _row: r + 1 }, vuota = true;
+    for (var c = 0; c < H.length; c++) { if (!H[c]) continue; var x = v[r][c]; if (x !== '' && x != null) vuota = false; o[H[c]] = x; }
+    if (!vuota) out.push(o);
+  }
+  return out;
+}
+function autoTrovaRiga_(sh, col, valore) {
+  var v = sh.getDataRange().getValues(); if (!v.length) return -1;
+  var c = v[0].map(function (h) { return up_(h); }).indexOf(col); if (c < 0) return -1;
+  for (var r = 1; r < v.length; r++) if (up_(v[r][c]) === up_(valore)) return r + 1;
+  return -1;
+}
+/* Scrive i campi presenti in obj (chiavi = intestazioni) tenendo gli altri
+   come sono. rowNum <= 0: riga nuova in fondo. */
+function autoScriviRiga_(sh, rowNum, obj) {
+  var lc = sh.getLastColumn();
+  var H = sh.getRange(1, 1, 1, lc).getValues()[0].map(function (h) { return up_(h); });
+  var cur = rowNum > 0 ? sh.getRange(rowNum, 1, 1, lc).getValues()[0] : H.map(function () { return ''; });
+  for (var c = 0; c < H.length; c++) if (H[c] && obj.hasOwnProperty(H[c]) && obj[H[c]] !== undefined) cur[c] = obj[H[c]] == null ? '' : obj[H[c]];
+  var n = rowNum > 0 ? rowNum : sh.getLastRow() + 1;
+  sh.getRange(n, 1, 1, lc).setValues([cur]);
+  return n;
+}
+function autoVoci_(s) {
+  return String(s || '').split(';').map(function (x) { return x.trim(); }).filter(Boolean).map(function (x) {
+    var i = x.lastIndexOf('=');
+    return i > 0 ? { nome: clean_(x.slice(0, i), 60), importo: autoNum_(x.slice(i + 1)) } : { nome: clean_(x, 60), importo: null };
+  });
+}
+function autoVociTesto_(voci) {
+  return (voci || []).map(function (v) { var n = clean_(v.nome, 60).replace(/[;=]/g, ' '); return v.importo != null && v.importo !== '' ? n + '=' + r2_(v.importo) : n; }).join('; ');
+}
+
+/* ---- lettura ---- */
+function autoUscite_(ss) {
+  var sh = uscSheet_(ss); if (!sh) return [];
+  var U = sh.getDataRange().getValues(); if (!U.length) return [];
+  var H = U[0];
+  var cData = colIdx_(H, ['DATA PAGAMENTO']), cAnno = colIdx_(H, ['ANNO']), cMese = colIdx_(H, ['MESE PAGAMENTO']);
+  var cSp = colIdx_(H, ['SPESA']), cCat = colIdx_(H, ['CATEGORIA']), cNote = colIdx_(H, ['NOTE']), cCc = colIdx_(H, ['CC']), cSt = statoCol_(H);
+  if (cSp < 0 || cCat < 0) return [];
+  var out = [];
+  for (var r = 1; r < U.length; r++) {
+    var cat = up_(U[r][cCat]); if (AUTO_CATEGORIE.indexOf(cat) < 0) continue;
+    var imp = autoNum_(U[r][cSp]); if (!(imp > 0)) continue;
+    var st = cSt >= 0 ? up_(U[r][cSt]) : '';
+    out.push({
+      row: r + 1, data: cData >= 0 ? iso_(U[r][cData]) : '',
+      anno: cAnno >= 0 ? Math.round(num_(U[r][cAnno])) : 0, mese: cMese >= 0 ? Math.round(num_(U[r][cMese])) - 1 : -1,
+      importo: imp, cat: cat, nota: cNote >= 0 ? clean_(U[r][cNote], 200) : '',
+      paid: st.indexOf('PAGAT') >= 0 ? 1 : 0, cc: cCc >= 0 && up_(U[r][cCc]) === 'SI' ? 1 : 0
+    });
+  }
+  return out;
+}
+function autoProp_(nome, dflt) { try { var v = PropertiesService.getScriptProperties().getProperty(nome); return v == null ? dflt : v; } catch (e) { return dflt; } }
+function autoPropJson_(nome) { try { return JSON.parse(autoProp_(nome, '') || 'null'); } catch (e) { return null; } }
+
+function autoDati_(ss) {
+  var sh = autoFogli_(ss);
+  var interventi = autoLeggi_(sh.interventi).map(function (o) {
+    return {
+      row: o._row, id: up_(o.ID), data: iso_(o.DATA), km: autoInt_(o.KM),
+      tipi: String(o.TIPO || '').split(/[,;+]/).map(function (t) { return up_(t); }).filter(function (t) { return AUTO_TIPI_.indexOf(t) >= 0; }),
+      voci: autoVoci_(o.VOCI), officina: clean_(o.OFFICINA, 60), costo: autoNum_(o.COSTO) || 0, straord: autoNum_(o.STRAORDINARIO) || 0,
+      pagamento: up_(o.PAGAMENTO), note: clean_(o.NOTE, 300)
+    };
+  }).filter(function (i) { return i.id && i.data; });
+  var km = autoLeggi_(sh.km).map(function (o) { return { row: o._row, data: iso_(o.DATA), km: autoInt_(o.KM), fonte: up_(o.FONTE) }; }).filter(function (k) { return k.data && k.km > 0; });
+  var scadenze = autoLeggi_(sh.scadenze).map(function (o) {
+    return { row: o._row, chiave: up_(o.CHIAVE), etichetta: clean_(o.ETICHETTA, 60) || up_(o.CHIAVE), scadenza: iso_(o.SCADENZA), importo: autoNum_(o.IMPORTO) || 0, ripetiMesi: autoInt_(o.RIPETI_MESI) || 0, preavviso: autoInt_(o.PREAVVISO_GG) || 30, note: clean_(o.NOTE, 200) };
+  }).filter(function (s) { return s.chiave; });
+  var piano = autoLeggi_(sh.piano).map(function (o) {
+    return { row: o._row, voce: clean_(o.VOCE, 60), fonte: up_(o.FONTE) === 'CBS' ? 'CBS' : 'MANUALE', intervalloKm: autoInt_(o.INTERVALLO_KM), intervalloMesi: autoInt_(o.INTERVALLO_MESI), ultimoKm: autoInt_(o.ULTIMO_KM), ultimaData: iso_(o.ULTIMA_DATA), kmScad: autoInt_(o.KM_SCAD), dataScad: iso_(o.DATA_SCAD), note: clean_(o.NOTE, 200) };
+  }).filter(function (p) { return p.voce; });
+  return { interventi: interventi, km: km, scadenze: scadenze, piano: piano, fogli: sh };
+}
+
+function buildAuto_() {
+  var ss = SpreadsheetApp.openById(CONFIG.SHEET_ID);
+  var d = autoDati_(ss);
+  return {
+    v: 1, fonte: 'Google Sheets (AUTO_*, USCITE)', oggi: autoOggi_(),
+    veicolo: AUTO_VEICOLO, interventi: d.interventi, km: d.km, scadenze: d.scadenze, piano: d.piano,
+    uscite: autoUscite_(ss),
+    notifiche: { trigger: autoProp_('AUTO_TRIGGER', '') || '', ultimo: autoPropJson_('AUTO_ULTIMO_CONTROLLO') }
+  };
+}
+function getDatiAuto(opz) { return conCache_('auto', opz && opz.forza, buildAuto_, 'AUTO'); }
+
+/* ---- scritture ---- */
+function autoConLock_(fn, dove) {
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(15000);
+    var out = fn(SpreadsheetApp.openById(CONFIG.SHEET_ID));
+    if (out && !out.error) cacheClear_();
+    return out;
+  } catch (e) {
+    return err_(e, dove);
+  } finally {
+    try { lock.releaseLock(); } catch (el) {}
+  }
+}
+function autoNuovoId_(sh) {
+  var max = 0;
+  autoLeggi_(sh).forEach(function (o) { var m = String(o.ID || '').match(/(\d+)$/); if (m && +m[1] > max) max = +m[1]; });
+  return 'AUTO-' + ('000' + (max + 1)).slice(-4);
+}
+/* I km non tornano indietro: una lettura non puo' essere minore di una
+   precedente ne' maggiore di una successiva (letture di AUTO_KM e km degli
+   interventi; `escludiId` toglie l'intervento che si sta modificando).
+   Torna il motivo, o '' se va bene. Stessa regola del client. */
+function autoKmIncoerenti_(sh, data, km, escludiId) {
+  if (!data || !(km > 0)) return '';
+  var l = [];
+  autoLeggi_(sh.km).forEach(function (o) { var k = autoInt_(o.KM), d = iso_(o.DATA); if (d && k > 0) l.push({ data: d, km: k }); });
+  autoLeggi_(sh.interventi).forEach(function (o) { var k = autoInt_(o.KM), d = iso_(o.DATA); if (d && k > 0 && up_(o.ID) !== up_(escludiId || '')) l.push({ data: d, km: k }); });
+  for (var i = 0; i < l.length; i++) {
+    if (l[i].data <= data && l[i].km > km) return 'I km non tornano: il ' + autoDataIt_(l[i].data) + ' erano già ' + l[i].km + ' km.';
+    if (l[i].data >= data && l[i].km < km) return 'I km non tornano: il ' + autoDataIt_(l[i].data) + ' erano ' + l[i].km + ' km, questa lettura è troppo alta.';
+  }
+  return '';
+}
+function autoAggiungiKm_(sh, data, km, fonte) {
+  var gia = autoLeggi_(sh).some(function (o) { return iso_(o.DATA) === data && autoInt_(o.KM) === km; });
+  if (!gia) autoScriviRiga_(sh, -1, { DATA: data, KM: km, FONTE: fonte });
+}
+/* Righe nuove in USCITE, categoria MACCHINA, tutte in un colpo solo. */
+function autoScriviUscite_(ss, righe, pay) {
+  var sh = uscSheet_(ss);
+  if (!sh) throw new Error('Foglio USCITE non trovato.');
+  var H = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+  var cStato = ensureStatoCol_(sh, H);
+  var cData = colIdx_(H, ['DATA PAGAMENTO']), cAnno = colIdx_(H, ['ANNO']), cMese = colIdx_(H, ['MESE PAGAMENTO']);
+  var cNome = colIdx_(H, ['NOME MESE']), cSp = colIdx_(H, ['SPESA']), cCat = colIdx_(H, ['CATEGORIA']);
+  var cNote = colIdx_(H, ['NOTE']), cCc = colIdx_(H, ['CC']), cTipo = colIdx_(H, ['TIPO']);
+  if (cAnno < 0 || cMese < 0 || cSp < 0 || cCat < 0) throw new Error('Header USCITE privo di colonne chiave.');
+  var oggi = autoOggi_(), conCarta = pay === 'cc', blocco = [];
+  righe.forEach(function (x) {
+    var d = autoD_(x.data); if (!d) throw new Error('Data non valida: ' + x.data);
+    var row = []; for (var c = 0; c < H.length; c++) row.push('');
+    if (cData >= 0) row[cData] = x.data;
+    row[cAnno] = d.getFullYear(); row[cMese] = d.getMonth() + 1;
+    if (cNome >= 0) row[cNome] = MESI_UP_[d.getMonth()];
+    row[cSp] = r2_(x.importo); row[cCat] = 'MACCHINA';
+    if (cNote >= 0) row[cNote] = clean_(x.nota, 200);
+    if (cCc >= 0) row[cCc] = conCarta ? 'SI' : '';
+    if (cTipo >= 0) row[cTipo] = x.tipo === 'FISSA' ? 'FISSA' : 'VARIABILE';
+    if (cStato >= 0) row[cStato] = !conCarta && x.data <= oggi && !x.daPagare ? PAID_V : UNPAID_V;
+    blocco.push(row);
+  });
+  if (!blocco.length) return 0;
+  sh.getRange(sh.getLastRow() + 1, 1, blocco.length, H.length).setValues(blocco);
+  return blocco.length;
+}
+function autoPianoFatto_(sh, voci, data, km) {
+  var n = 0, nomi = (voci || []).map(function (v) { return up_(v.nome); });
+  autoLeggi_(sh).forEach(function (o) {
+    if (nomi.indexOf(up_(o.VOCE)) < 0) return;
+    autoScriviRiga_(sh, o._row, { ULTIMO_KM: km > 0 ? km : '', ULTIMA_DATA: data, KM_SCAD: '', DATA_SCAD: '' });
+    n++;
+  });
+  return n;
+}
+function autoApplicaPiano_(sh, righe, km, data) {
+  var n = 0;
+  (righe || []).forEach(function (r) {
+    var voce = clean_(r.voce, 60); if (!voce) return;
+    var row = autoTrovaRiga_(sh, 'VOCE', voce);
+    if (r.elimina) { if (row > 0) { sh.deleteRow(row); n++; } return; }
+    var o = {};
+    if (r.fonte) o.FONTE = up_(r.fonte) === 'CBS' ? 'CBS' : 'MANUALE';
+    ['intervalloKm', 'intervalloMesi', 'ultimoKm', 'kmScad'].forEach(function (k) { if (r[k] !== undefined) o[{ intervalloKm: 'INTERVALLO_KM', intervalloMesi: 'INTERVALLO_MESI', ultimoKm: 'ULTIMO_KM', kmScad: 'KM_SCAD' }[k]] = autoInt_(r[k]) > 0 ? autoInt_(r[k]) : ''; });
+    if (r.ultimaData !== undefined) o.ULTIMA_DATA = iso_(r.ultimaData);
+    if (r.dataScad !== undefined) o.DATA_SCAD = iso_(r.dataScad);
+    if (r.note !== undefined) o.NOTE = clean_(r.note, 200);
+    // dal computer di bordo: "tra X km" e "entro MM/AAAA"
+    if (autoInt_(r.traKm) != null && km > 0) o.KM_SCAD = km + autoInt_(r.traKm);
+    if (r.entro) { var m = String(r.entro).match(/^(\d{4})-(\d{2})/); if (m) o.DATA_SCAD = autoFineMese_(m[1] + '-' + m[2] + '-01'); }
+    if (row < 0) { o.VOCE = voce; if (!o.FONTE) o.FONTE = 'MANUALE'; }
+    autoScriviRiga_(sh, row, o);
+    n++;
+  });
+  return n;
+}
+
+function autoSalvaIntervento(p) {
+  return autoConLock_(function (ss) {
+    if (!p) return { error: 'Intervento vuoto.' };
+    var data = iso_(p.data); if (!data) return { error: 'Data mancante o non valida.' };
+    var tipi = (p.tipi || []).map(function (t) { return up_(t); }).filter(function (t) { return AUTO_TIPI_.indexOf(t) >= 0; });
+    if (!tipi.length) return { error: 'Scegli almeno un tipo di intervento.' };
+    var costo = r2_(p.costo); if (costo < 0) return { error: 'Costo non valido.' };
+    var straord = Math.min(costo, Math.max(0, r2_(p.straord)));
+    var km = autoInt_(p.km) || 0;
+    var sh = autoFogli_(ss);
+    var nuovo = !p.id, id = nuovo ? autoNuovoId_(sh.interventi) : up_(p.id);
+    /* ogni intervento porta i km: sono la meta' dell'informazione (piano,
+       media km/mese, scadenze a km). Su un intervento vecchio senza km la
+       modifica resta possibile. */
+    if (nuovo && !(km > 0)) return { error: 'Mancano i km dell\'intervento (in fattura o sul contachilometri).' };
+    var kmErr = autoKmIncoerenti_(sh, data, km, nuovo ? '' : id); if (kmErr) return { error: kmErr };
+    var rowNum = nuovo ? -1 : autoTrovaRiga_(sh.interventi, 'ID', id);
+    if (!nuovo && rowNum < 0) return { error: 'Intervento ' + id + ' non trovato: ricarica.' };
+    var voci = (p.voci || []).filter(function (v) { return v && clean_(v.nome, 60); });
+    var u = p.uscite || {}, modo = nuovo ? (['UNICA', 'RATE'].indexOf(up_(u.modo)) >= 0 ? up_(u.modo) : 'NESSUNA') : undefined;
+    var righe = [];
+    if (nuovo && modo !== 'NESSUNA' && costo > 0) {
+      var r0 = (u.rate || []).filter(function (r) { return r && iso_(r.data) && r2_(r.importo) > 0; });
+      if (!r0.length) return { error: 'Manca la data di pagamento.' };
+      var somma = r2_(r0.reduce(function (s, r) { return s + r2_(r.importo); }, 0));
+      if (Math.abs(somma - costo) > 0.01) return { error: 'Le rate sommano ' + somma + ' €, il costo è ' + costo + ' €: non scrivo nulla.' };
+      var etich = voci.length ? voci.map(function (v) { return clean_(v.nome, 40); }).join(' + ') : tipi.join(' + ');
+      r0.forEach(function (r, k) {
+        righe.push({ data: iso_(r.data), importo: r2_(r.importo), tipo: r0.length > 1 ? 'FISSA' : 'VARIABILE',
+          nota: etich + (p.officina ? ' · ' + clean_(p.officina, 40) : '') + (r0.length > 1 ? ' · rata ' + (k + 1) + '/' + r0.length : '') + ' [' + id + ']' });
+      });
+    }
+    autoScriviRiga_(sh.interventi, rowNum, {
+      ID: id, DATA: data, KM: km > 0 ? km : '', TIPO: tipi.join(','), VOCI: autoVociTesto_(voci), OFFICINA: clean_(p.officina, 60),
+      COSTO: costo, STRAORDINARIO: straord, PAGAMENTO: modo, NOTE: clean_(p.note, 300)
+    });
+    var nUscite = righe.length ? autoScriviUscite_(ss, righe, u.pay) : 0;
+    if (km > 0) autoAggiungiKm_(sh.km, data, km, 'INTERVENTO');
+    var nPiano = autoPianoFatto_(sh.piano, voci, data, km);
+    if (p.cbs && p.cbs.length) autoApplicaPiano_(sh.piano, p.cbs, km, data);
+    if (tipi.indexOf('REVISIONE') >= 0) {
+      var rr = autoTrovaRiga_(sh.scadenze, 'CHIAVE', 'REVISIONE');
+      var prox = autoFineMese_(autoPiuMesi_(data.slice(0, 7) + '-01', 24));
+      autoScriviRiga_(sh.scadenze, rr, rr > 0 ? { SCADENZA: prox } : { CHIAVE: 'REVISIONE', ETICHETTA: 'Revisione', SCADENZA: prox, IMPORTO: costo || '', RIPETI_MESI: 24, PREAVVISO_GG: 60 });
+    }
+    return { ok: true, id: id, nuovo: nuovo, righeUscite: nUscite, vociPiano: nPiano, usciteScritte: nUscite > 0 };
+  }, 'autoSalvaIntervento');
+}
+
+function autoEliminaIntervento(p) {
+  return autoConLock_(function (ss) {
+    var sh = autoFogli_(ss), row = autoTrovaRiga_(sh.interventi, 'ID', p && p.id);
+    if (row < 0) return { error: 'Intervento non trovato: ricarica.' };
+    sh.interventi.deleteRow(row);
+    return { ok: true };
+  }, 'autoEliminaIntervento');
+}
+
+function autoSalvaKm(p) {
+  return autoConLock_(function (ss) {
+    var data = iso_(p && p.data), km = autoInt_(p && p.km);
+    if (!data || !(km > 0)) return { error: 'Data o km non validi.' };
+    var sh = autoFogli_(ss);
+    var kmErr = autoKmIncoerenti_(sh, data, km); if (kmErr) return { error: kmErr };
+    autoAggiungiKm_(sh.km, data, km, 'MANUALE');
+    return { ok: true };
+  }, 'autoSalvaKm');
+}
+
+function autoSalvaScadenza(p) {
+  return autoConLock_(function (ss) {
+    if (!p) return { error: 'Scadenza vuota.' };
+    var sh = autoFogli_(ss).scadenze;
+    var chiave = up_(p.chiave) || up_(p.etichetta).replace(/[^A-Z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 30);
+    if (!chiave) return { error: 'Manca il nome della scadenza.' };
+    var row = autoTrovaRiga_(sh, 'CHIAVE', chiave);
+    if (p.elimina) {
+      if (['RCA', 'BOLLO', 'REVISIONE'].indexOf(chiave) >= 0) return { error: 'Questa scadenza non si elimina: cambiane la data.' };
+      if (row > 0) sh.deleteRow(row);
+      return { ok: true };
+    }
+    var scad = iso_(p.scadenza); if (!scad) return { error: 'Data di scadenza non valida.' };
+    var km = autoInt_(p.km) || 0, dataKm = iso_(p.data) || autoOggi_(), fogli = null;
+    if (km > 0) { fogli = autoFogli_(ss); var kmErr = autoKmIncoerenti_(fogli, dataKm, km); if (kmErr) return { error: kmErr }; }
+    var ripeti = autoInt_(p.ripetiMesi) || 0;
+    if (p.rinnova) { if (!ripeti) return { error: 'Senza "ogni N mesi" non so di quanto spostarla.' }; scad = autoPiuMesi_(scad, ripeti); }
+    var o = { CHIAVE: chiave, SCADENZA: scad, IMPORTO: r2_(p.importo) || '', RIPETI_MESI: ripeti || '', PREAVVISO_GG: autoInt_(p.preavviso) || 30 };
+    if (p.etichetta) o.ETICHETTA = clean_(p.etichetta, 60);
+    if (p.note !== undefined) o.NOTE = clean_(p.note, 200);
+    autoScriviRiga_(sh, row, o);
+    if (km > 0) autoAggiungiKm_(fogli.km, dataKm, km, 'SCADENZA ' + chiave);
+    return { ok: true, scadenza: scad };
+  }, 'autoSalvaScadenza');
+}
+
+function autoSalvaPiano(p) {
+  return autoConLock_(function (ss) {
+    var sh = autoFogli_(ss), km = autoInt_(p && p.km) || 0, data = iso_(p && p.data) || autoOggi_();
+    if (km > 0) { var kmErr = autoKmIncoerenti_(sh, data, km); if (kmErr) return { error: kmErr }; autoAggiungiKm_(sh.km, data, km, 'CBS'); }
+    var n = autoApplicaPiano_(sh.piano, (p && p.righe) || [], km, data);
+    return { ok: true, voci: n };
+  }, 'autoSalvaPiano');
+}
+
+/* Correzioni proposte dall'app (AUTO:CORE autoIncoerenze). Ogni riga
+   esistente viene RICONTROLLATA (categoria auto, stesso importo) prima di
+   toccarla: se il foglio e' cambiato nel frattempo, ci si ferma. */
+function autoCorreggi(a) {
+  return autoConLock_(function (ss) {
+    if (!a || !a.tipo || !(a.righe && a.righe.length)) return { error: 'Correzione vuota.' };
+    if (a.tipo === 'crea') {
+      var n = autoScriviUscite_(ss, a.righe.map(function (r) { return { data: iso_(r.data), importo: r2_(r.importo), nota: r.nota, tipo: 'FISSA', daPagare: true }; }), 'conto');
+      return { ok: true, righe: n, usciteScritte: true };
+    }
+    var sh = uscSheet_(ss); if (!sh) return { error: 'Foglio USCITE non trovato.' };
+    var H = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+    var cData = colIdx_(H, ['DATA PAGAMENTO']), cAnno = colIdx_(H, ['ANNO']), cMese = colIdx_(H, ['MESE PAGAMENTO']);
+    var cNome = colIdx_(H, ['NOME MESE']), cSp = colIdx_(H, ['SPESA']), cCat = colIdx_(H, ['CATEGORIA']), cSt = statoCol_(H);
+    var last = sh.getLastRow(), nuove = [];
+    for (var i = 0; i < a.righe.length; i++) {
+      var r = a.righe[i], row = Math.round(num_(r.row));
+      if (row < 2 || row > last) return { error: 'Riga ' + row + ' oltre i dati: ricarica.' };
+      var rv = sh.getRange(row, 1, 1, H.length).getValues()[0];
+      if (AUTO_CATEGORIE.indexOf(up_(rv[cCat])) < 0 || Math.abs(r2_(autoNum_(rv[cSp])) - r2_(r.importo)) > 0.005) return { error: 'La riga ' + row + ' è cambiata: ricarica e riprova.' };
+      if (a.tipo === 'date') {
+        var d = autoD_(r.data); if (!d) return { error: 'Data non valida: ' + r.data };
+        if (cData >= 0) rv[cData] = r.data;
+        if (cAnno >= 0) rv[cAnno] = d.getFullYear();
+        if (cMese >= 0) rv[cMese] = d.getMonth() + 1;
+        if (cNome >= 0) rv[cNome] = MESI_UP_[d.getMonth()];
+      } else if (a.tipo === 'stato') {
+        if (cSt < 0) return { error: 'Colonna di stato assente.' };
+        rv[cSt] = a.paid ? PAID_V : UNPAID_V;
+      } else return { error: 'Correzione sconosciuta: ' + a.tipo };
+      nuove.push([row, rv]);
+    }
+    nuove.forEach(function (x) { sh.getRange(x[0], 1, 1, H.length).setValues([x[1]]); });
+    return { ok: true, righe: nuove.length, usciteScritte: true };
+  }, 'autoCorreggi');
+}
+
+/* ---- promemoria: email + Google Calendar ---- */
+var AUTO_SOGLIE_GG = [7, 1, 0];
+function autoCatene_(oggi) {
+  var d = autoD_(oggi), y = d.getFullYear(), m = d.getMonth(), g = d.getDate();
+  var inCorso = m > 10 || (m === 10 && g >= 15) || m < 3 || (m === 3 && g <= 15);
+  return inCorso ? null : y + '-11-15';
+}
+/* Le stesse scadenze del client, nella forma che serve alle notifiche:
+   scadenze del foglio, catene a bordo, voci del piano con una data o vicine
+   in km. */
+function autoElencoAvvisi_(d, oggi) {
+  var out = [];
+  d.scadenze.forEach(function (s) { if (s.scadenza) out.push({ chiave: s.chiave, etichetta: s.etichetta, data: s.scadenza, importo: s.importo, preavviso: s.preavviso || 30, note: s.note }); });
+  var cat = autoCatene_(oggi);
+  if (cat) out.push({ chiave: 'CATENE', etichetta: 'Catene a bordo (obbligo invernale)', data: cat, preavviso: 14, note: 'Dal 15/11 al 15/04 dove c\'è ordinanza: con le estive servono le catene in auto.' });
+  var kmAtt = 0;
+  d.km.forEach(function (k) { if (k.km > kmAtt) kmAtt = k.km; });
+  d.interventi.forEach(function (i) { if (i.km > kmAtt) kmAtt = i.km; });
+  d.piano.forEach(function (p) {
+    var ds = p.dataScad || (p.ultimaData && p.intervalloMesi ? autoPiuMesi_(p.ultimaData, p.intervalloMesi) : '');
+    if (ds) out.push({ chiave: 'PIANO:' + up_(p.voce), etichetta: p.voce, data: ds, preavviso: 30, note: p.note });
+    var ks = p.kmScad || (p.ultimoKm && p.intervalloKm ? p.ultimoKm + p.intervalloKm : 0);
+    if (ks && kmAtt) out.push({ chiave: 'KM:' + up_(p.voce), etichetta: p.voce, residuoKm: ks - kmAtt, kmScad: ks, note: p.note });
+  });
+  out.forEach(function (x) { x.giorni = x.data ? autoGiorni_(oggi, x.data) : null; });
+  return out;
+}
+function autoQuando_(x) {
+  if (x.residuoKm != null) return x.residuoKm < 0 ? 'superato di ' + (-x.residuoKm) + ' km' : 'tra ' + x.residuoKm + ' km';
+  var g = x.giorni, dt = autoDataIt_(x.data);
+  return g < 0 ? 'SCADUTA da ' + (-g) + ' giorni (' + dt + ')' : g === 0 ? 'scade OGGI (' + dt + ')' : g === 1 ? 'scade domani (' + dt + ')' : 'scade tra ' + g + ' giorni (' + dt + ')';
+}
+/* Soglia raggiunta: la piu' piccola fra preavviso, 7, 1, 0 che e' >= ai
+   giorni che mancano; -1 se e' gia' scaduta. Una chiave per soglia, cosi'
+   ogni soglia manda UNA email e una sola. */
+function autoSoglia_(x) {
+  if (x.residuoKm != null) return x.residuoKm < 0 ? -1 : x.residuoKm <= 300 ? 300 : x.residuoKm <= 1000 ? 1000 : null;
+  if (x.giorni == null) return null;
+  if (x.giorni < 0) return x.giorni >= -30 ? -1 : null;
+  var s = [x.preavviso || 30].concat(AUTO_SOGLIE_GG).sort(function (a, b) { return a - b; });
+  for (var i = 0; i < s.length; i++) if (x.giorni <= s[i]) return s[i];
+  return null;
+}
+function autoEmail_() {
+  var p = autoProp_('AUTO_EMAIL', ''); if (p) return p;
+  try { return Session.getEffectiveUser().getEmail(); } catch (e) { return ''; }
+}
+function autoInviaEmail_(items) {
+  var to = autoEmail_(); if (!to) throw new Error('indirizzo email non disponibile (scope userinfo.email o proprietà AUTO_EMAIL)');
+  var righe = items.map(function (x) { return '• ' + x.etichetta + ': ' + autoQuando_(x) + (x.importo ? ' · ' + x.importo + ' €' : '') + (x.note ? '\n   ' + x.note : ''); });
+  var html = '<div style="font-family:sans-serif;font-size:14px"><p><b>' + AUTO_VEICOLO.modello + '</b> — promemoria dall\'app Finanza</p><ul>' +
+    items.map(function (x) { return '<li><b>' + x.etichetta + '</b>: ' + autoQuando_(x) + (x.importo ? ' · ' + x.importo + ' €' : '') + (x.note ? '<br><span style="color:#666">' + x.note + '</span>' : '') + '</li>'; }).join('') + '</ul></div>';
+  var subj = 'Auto · ' + (items.length === 1 ? items[0].etichetta + ' ' + autoQuando_(items[0]) : items.length + ' promemoria');
+  MailApp.sendEmail({ to: to, subject: subj, body: AUTO_VEICOLO.modello + ' — promemoria dall\'app Finanza\n\n' + righe.join('\n') + '\n', htmlBody: html });
+  return { n: items.length };
+}
+/* Un evento per chiave sul calendario principale, tutto il giorno, con
+   popup 7 giorni prima e il giorno prima alle 9. Se la data cambia (bollo
+   pagato e rinnovato) l'evento si SPOSTA: niente doppioni da cancellare. */
+function autoSincronizzaCalendar_(lista) {
+  var props = PropertiesService.getScriptProperties();
+  var mappa = {}; try { mappa = JSON.parse(props.getProperty('AUTO_CAL') || '{}') || {}; } catch (e) { mappa = {}; }
+  var cal = CalendarApp.getDefaultCalendar(), n = 0, creati = 0, spostati = 0;
+  lista.forEach(function (x) {
+    if (!x.data || x.giorni == null || x.giorni < 0) return;
+    var titolo = 'Auto · ' + x.etichetta;
+    var desc = (x.importo ? 'Importo previsto: ' + x.importo + ' €\n' : '') + (x.note ? x.note + '\n' : '') + 'Creato dall\'app Finanza (modulo Auto).';
+    var firma = titolo + '|' + desc, rec = mappa[x.chiave], ev = null;
+    if (rec && rec.id) { try { ev = cal.getEventById(rec.id); } catch (e) { ev = null; } }
+    var d = autoD_(x.data);
+    if (!ev) { ev = cal.createAllDayEvent(titolo, d, { description: desc }); creati++; rec = null; }
+    else if (rec.data !== x.data) { ev.setAllDayDate(d); spostati++; }
+    if (!rec || rec.firma !== firma || rec.data !== x.data) {
+      ev.setTitle(titolo); ev.setDescription(desc);
+      try { ev.removeAllReminders(); ev.addPopupReminder(9540); ev.addPopupReminder(900); } catch (e) {}
+    }
+    mappa[x.chiave] = { id: ev.getId(), data: x.data, firma: firma };
+    n++;
+  });
+  props.setProperty('AUTO_CAL', JSON.stringify(mappa));
+  return { n: n, creati: creati, spostati: spostati };
+}
+/* Gira ogni mattina (installaTriggerAuto). Con { prova: true } (pulsante
+   "Controlla ora") manda il riepilogo di tutto quello che scade entro 60
+   giorni senza consumare le soglie vere. */
+function autoControlloScadenze(opz) {
+  var prova = !!(opz && opz.prova === true);
+  var esito = { ok: true, email: null, calendar: null, errori: [] };
+  try {
+    var ss = SpreadsheetApp.openById(CONFIG.SHEET_ID), d = autoDati_(ss), oggi = autoOggi_();
+    var lista = autoElencoAvvisi_(d, oggi);
+    var props = PropertiesService.getScriptProperties();
+    var inviati = {}; try { inviati = JSON.parse(props.getProperty('AUTO_AVVISI') || '{}') || {}; } catch (e) { inviati = {}; }
+    var daAvvisare = [];
+    lista.forEach(function (x) {
+      if (prova) { if ((x.giorni != null && x.giorni <= 60 && x.giorni >= -30) || (x.residuoKm != null && x.residuoKm <= 1000)) daAvvisare.push(x); return; }
+      var s = autoSoglia_(x); if (s === null) return;
+      var k = x.chiave + '|' + (x.data || x.kmScad) + '|' + s;
+      if (inviati[k]) return;
+      daAvvisare.push(x); inviati[k] = oggi;
+    });
+    if (daAvvisare.length) { try { esito.email = autoInviaEmail_(daAvvisare); } catch (e) { esito.errori.push('email: ' + (e && e.message ? e.message : e)); } }
+    else esito.email = { n: 0 };
+    try { esito.calendar = autoSincronizzaCalendar_(lista); } catch (e) { esito.errori.push('calendar: ' + (e && e.message ? e.message : e)); }
+    // le soglie piu' vecchie di un anno non servono piu'
+    var lim = autoPiuMesi_(oggi, -13);
+    for (var k in inviati) if (inviati.hasOwnProperty(k) && inviati[k] < lim) delete inviati[k];
+    if (!prova) props.setProperty('AUTO_AVVISI', JSON.stringify(inviati));
+    props.setProperty('AUTO_ULTIMO_CONTROLLO', JSON.stringify({ ts: new Date().toISOString(), email: esito.email ? esito.email.n : 0, eventi: esito.calendar ? esito.calendar.n : 0, errori: esito.errori, prova: prova }));
+    cacheClear_();
+    if (esito.errori.length) esito.error = 'Controllo fatto con errori — ' + esito.errori.join(' · ') + '. Vedi AUTO.md, "Attivare i promemoria".';
+    return esito;
+  } catch (e) {
+    return err_(e, 'autoControlloScadenze');
+  }
+}
+/* Da eseguire UNA volta (dall'editor o dal pulsante dell'app): crea il
+   controllo giornaliero alle 7 e lancia subito il primo. */
+function installaTriggerAuto() {
+  try {
+    var tr = ScriptApp.getProjectTriggers();
+    for (var i = 0; i < tr.length; i++) if (tr[i].getHandlerFunction() === 'autoControlloScadenze') ScriptApp.deleteTrigger(tr[i]);
+    ScriptApp.newTrigger('autoControlloScadenze').timeBased().everyDays(1).atHour(7).create();
+    PropertiesService.getScriptProperties().setProperty('AUTO_TRIGGER', new Date().toISOString());
+    var primo = autoControlloScadenze();
+    Logger.log('Trigger creato. Primo controllo: ' + JSON.stringify(primo));
+    if (primo && primo.error) return { error: 'Trigger creato, ma il primo controllo ha dato errore: ' + primo.error };
+    return { ok: true, primo: primo, email: primo.email, calendar: primo.calendar };
+  } catch (e) {
+    return err_(e, 'installaTriggerAuto');
   }
 }
 

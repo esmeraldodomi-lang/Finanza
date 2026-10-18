@@ -188,7 +188,9 @@ e la schermata di consenso non ricompare.
 
    `spreadsheets` serve a `SpreadsheetApp.openById`, `script.external_request`
    a `UrlFetchApp.fetch`. Con Vertex si aggiunge anche
-   `https://www.googleapis.com/auth/cloud-platform`;
+   `https://www.googleapis.com/auth/cloud-platform`. Il modulo Auto ne vuole
+   altri quattro (email, Calendar, trigger, indirizzo del proprietario):
+   l'elenco completo è nel `README.md`, §4;
 3. salva ed esegui di nuovo **`testIA()`**: ora compare *Rivedi autorizzazioni*
    → account → **Avanzate** → *Vai a … (non sicuro)* → **Consenti**;
 4. se il consenso non compare ancora, revoca l'accesso dell'app da
