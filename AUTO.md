@@ -43,6 +43,7 @@ I fogli `AUTO_*` tengono solo quello che USCITE non sa. Si creano **da soli** al
 | **Catene a bordo** | Gomme estive tutto l'anno → catene obbligatorie dal 15/11 al 15/04 dove c'è ordinanza. |
 | **Piano (CBS)** | "Tra X km" dal computer di bordo → `KM_SCAD = km attuali + X`; "entro MM/AAAA" → ultimo giorno del mese. Senza valori CBS: ultimo + intervallo. Vince la prima tra km e data. |
 | **Km/mese** | Solo con letture che coprono almeno 60 giorni: con meno, il numero sarebbe inventato. |
+| **Km su ogni azione** | Obbligatori su ogni **nuovo intervento**, sulla copia dal computer di bordo e quando segni una scadenza come **rinnovata** (finiscono in `AUTO_KM` con la fonte). Server e app rifiutano una lettura più bassa di una precedente o più alta di una successiva. Un intervento vecchio senza km resta modificabile: lo storico lo segnala con la **stima** interpolata fra le due letture vicine (mai scritta nel foglio). |
 | **Costo ordinario** | Totale anno − parte straordinaria degli interventi − bolli arretrati (`BOLLO 2024` pagato nel 2026). |
 | **Sanzioni bollo** | Per ogni bollo arretrato: pagato − bollo normale (importo della scadenza `BOLLO`). |
 | **Stato** | scaduto (< 0 gg) · urgente (≤ 7) · presto (≤ preavviso) · ok. Il pallino sul tab conta le voci non "ok". |

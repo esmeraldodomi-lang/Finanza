@@ -1275,7 +1275,7 @@ var AUTO_TIPI_ = ['TAGLIANDO', 'REVISIONE', 'STRAORDINARIO', 'GOMME', 'CARROZZER
    certo lo dicono nella nota: un valore messo per comodita' deve vedersi. */
 var AUTO_SEED = {
   interventi: [
-    ['AUTO-0001', '2024-08-02', '', 'GOMME', 'Pneumatici=380', 'Amuro Gomme', 380, 0, 'UNICA', 'Cambio gomme estive (montate tutto l\'anno)'],
+    ['AUTO-0001', '2024-08-02', 155000, 'GOMME', 'Pneumatici=380', 'Amuro Gomme', 380, 0, 'UNICA', 'Cambio gomme estive (montate tutto l\'anno)'],
     ['AUTO-0002', '2025-12-01', '', 'REVISIONE', 'Revisione=80', '', 80, 0, 'UNICA', 'Fatta a dicembre 2025 (giorno non registrato), pagata a gennaio 2026'],
     ['AUTO-0003', '2026-09-11', 180000, 'TAGLIANDO,STRAORDINARIO', 'Olio motore=300; Catena distribuzione=2100', '', 2400, 2100, 'RATE', 'Fattura 2.400 €, pagata a rate']
   ],
@@ -1455,6 +1455,21 @@ function autoNuovoId_(sh) {
   autoLeggi_(sh).forEach(function (o) { var m = String(o.ID || '').match(/(\d+)$/); if (m && +m[1] > max) max = +m[1]; });
   return 'AUTO-' + ('000' + (max + 1)).slice(-4);
 }
+/* I km non tornano indietro: una lettura non puo' essere minore di una
+   precedente ne' maggiore di una successiva (letture di AUTO_KM e km degli
+   interventi; `escludiId` toglie l'intervento che si sta modificando).
+   Torna il motivo, o '' se va bene. Stessa regola del client. */
+function autoKmIncoerenti_(sh, data, km, escludiId) {
+  if (!data || !(km > 0)) return '';
+  var l = [];
+  autoLeggi_(sh.km).forEach(function (o) { var k = autoInt_(o.KM), d = iso_(o.DATA); if (d && k > 0) l.push({ data: d, km: k }); });
+  autoLeggi_(sh.interventi).forEach(function (o) { var k = autoInt_(o.KM), d = iso_(o.DATA); if (d && k > 0 && up_(o.ID) !== up_(escludiId || '')) l.push({ data: d, km: k }); });
+  for (var i = 0; i < l.length; i++) {
+    if (l[i].data <= data && l[i].km > km) return 'I km non tornano: il ' + autoDataIt_(l[i].data) + ' erano già ' + l[i].km + ' km.';
+    if (l[i].data >= data && l[i].km < km) return 'I km non tornano: il ' + autoDataIt_(l[i].data) + ' erano ' + l[i].km + ' km, questa lettura è troppo alta.';
+  }
+  return '';
+}
 function autoAggiungiKm_(sh, data, km, fonte) {
   var gia = autoLeggi_(sh).some(function (o) { return iso_(o.DATA) === data && autoInt_(o.KM) === km; });
   if (!gia) autoScriviRiga_(sh, -1, { DATA: data, KM: km, FONTE: fonte });
@@ -1529,6 +1544,11 @@ function autoSalvaIntervento(p) {
     var km = autoInt_(p.km) || 0;
     var sh = autoFogli_(ss);
     var nuovo = !p.id, id = nuovo ? autoNuovoId_(sh.interventi) : up_(p.id);
+    /* ogni intervento porta i km: sono la meta' dell'informazione (piano,
+       media km/mese, scadenze a km). Su un intervento vecchio senza km la
+       modifica resta possibile. */
+    if (nuovo && !(km > 0)) return { error: 'Mancano i km dell\'intervento (in fattura o sul contachilometri).' };
+    var kmErr = autoKmIncoerenti_(sh, data, km, nuovo ? '' : id); if (kmErr) return { error: kmErr };
     var rowNum = nuovo ? -1 : autoTrovaRiga_(sh.interventi, 'ID', id);
     if (!nuovo && rowNum < 0) return { error: 'Intervento ' + id + ' non trovato: ricarica.' };
     var voci = (p.voci || []).filter(function (v) { return v && clean_(v.nome, 60); });
@@ -1576,8 +1596,7 @@ function autoSalvaKm(p) {
     var data = iso_(p && p.data), km = autoInt_(p && p.km);
     if (!data || !(km > 0)) return { error: 'Data o km non validi.' };
     var sh = autoFogli_(ss);
-    var max = 0; autoLeggi_(sh.km).forEach(function (o) { var k = autoInt_(o.KM); if (k > max) max = k; });
-    if (km < max) return { error: 'I km non possono scendere: ultima lettura ' + max + ' km.' };
+    var kmErr = autoKmIncoerenti_(sh, data, km); if (kmErr) return { error: kmErr };
     autoAggiungiKm_(sh.km, data, km, 'MANUALE');
     return { ok: true };
   }, 'autoSalvaKm');
@@ -1596,12 +1615,15 @@ function autoSalvaScadenza(p) {
       return { ok: true };
     }
     var scad = iso_(p.scadenza); if (!scad) return { error: 'Data di scadenza non valida.' };
+    var km = autoInt_(p.km) || 0, dataKm = iso_(p.data) || autoOggi_(), fogli = null;
+    if (km > 0) { fogli = autoFogli_(ss); var kmErr = autoKmIncoerenti_(fogli, dataKm, km); if (kmErr) return { error: kmErr }; }
     var ripeti = autoInt_(p.ripetiMesi) || 0;
     if (p.rinnova) { if (!ripeti) return { error: 'Senza "ogni N mesi" non so di quanto spostarla.' }; scad = autoPiuMesi_(scad, ripeti); }
     var o = { CHIAVE: chiave, SCADENZA: scad, IMPORTO: r2_(p.importo) || '', RIPETI_MESI: ripeti || '', PREAVVISO_GG: autoInt_(p.preavviso) || 30 };
     if (p.etichetta) o.ETICHETTA = clean_(p.etichetta, 60);
     if (p.note !== undefined) o.NOTE = clean_(p.note, 200);
     autoScriviRiga_(sh, row, o);
+    if (km > 0) autoAggiungiKm_(fogli.km, dataKm, km, 'SCADENZA ' + chiave);
     return { ok: true, scadenza: scad };
   }, 'autoSalvaScadenza');
 }
@@ -1609,7 +1631,7 @@ function autoSalvaScadenza(p) {
 function autoSalvaPiano(p) {
   return autoConLock_(function (ss) {
     var sh = autoFogli_(ss), km = autoInt_(p && p.km) || 0, data = iso_(p && p.data) || autoOggi_();
-    if (km > 0) autoAggiungiKm_(sh.km, data, km, 'CBS');
+    if (km > 0) { var kmErr = autoKmIncoerenti_(sh, data, km); if (kmErr) return { error: kmErr }; autoAggiungiKm_(sh.km, data, km, 'CBS'); }
     var n = autoApplicaPiano_(sh.piano, (p && p.righe) || [], km, data);
     return { ok: true, voci: n };
   }, 'autoSalvaPiano');

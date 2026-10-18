@@ -1449,6 +1449,33 @@ function autoKmAttuali(dati) {
 }
 /* Media mensile solo se le letture coprono almeno due mesi: con cinque
    settimane e un km di tagliando arrotondato verrebbe un numero inventato. */
+/* Km a una data, per interpolazione fra le due letture che la stringono.
+   Serve agli interventi registrati senza km: si mostra come STIMA, non si
+   scrive mai nel foglio. Fuori dall'intervallo delle letture: null. */
+function autoKmStimati(dati, data) {
+  const l = autoLetture(dati); if (!data || l.length < 2) return null;
+  let prima = null, dopo = null;
+  l.forEach(x => { if (x.data <= data && (!prima || x.data >= prima.data)) prima = x; if (x.data >= data && (!dopo || x.data < dopo.data)) dopo = x; });
+  if (!prima || !dopo) return null;
+  if (prima.data === dopo.data) return prima.km;
+  const t = autoGiorni(prima.data, data) / autoGiorni(prima.data, dopo.data);
+  return Math.round(prima.km + (dopo.km - prima.km) * t);
+}
+/* I km non tornano indietro: una lettura a una data non puo' essere minore
+   di una lettura precedente ne' maggiore di una successiva. `escludiId`
+   toglie l'intervento che si sta modificando (i suoi km vecchi). Torna il
+   motivo, o "" se va bene. */
+function autoKmIncoerenti(dati, data, km, escludiId) {
+  if (!data || !(km > 0)) return "";
+  const l = [];
+  ((dati && dati.km) || []).forEach(k => { if (k.data && k.km > 0) l.push(k); });
+  ((dati && dati.interventi) || []).forEach(i => { if (i.data && i.km > 0 && i.id !== escludiId) l.push(i); });
+  const prima = l.filter(x => x.data <= data && x.km > km).sort((a, b) => b.km - a.km)[0];
+  if (prima) return "Il " + autoDataIt(prima.data) + " erano già " + prima.km.toLocaleString("it-IT") + " km";
+  const dopo = l.filter(x => x.data >= data && x.km < km).sort((a, b) => a.km - b.km)[0];
+  if (dopo) return "Il " + autoDataIt(dopo.data) + " erano " + dopo.km.toLocaleString("it-IT") + " km: questa lettura è troppo alta";
+  return "";
+}
 function autoKmMese(dati) {
   const l = autoLetture(dati); if (l.length < 2) return null;
   const a = l[0], b = l[l.length - 1], gg = autoGiorni(a.data, b.data);
@@ -6092,6 +6119,7 @@ function AutoStorico({ d, onApri }) {
             aH("span", { style: { fontWeight: 700, fontSize: 14 } }, autoEtichetta(i)),
             aH("span", { style: { fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 14 } }, autoEu(i.costo))),
           aH("div", { style: { fontFamily: "ui-monospace, monospace", fontSize: 11, color: C.mut, marginTop: 3 } }, [autoDataIt(i.data), i.km ? autoKmIt(i.km) + " km" : null, i.officina || null].filter(Boolean).join(" · ")),
+          !i.km && aH("div", { style: { fontSize: 10.5, color: C.amber, marginTop: 3 } }, "km non registrati" + (autoKmStimati(d, i.data) ? " · stima ≈ " + autoKmIt(Math.round(autoKmStimati(d, i.data) / 100) * 100) + " km" : "") + " — tocca per inserirli"),
           (i.voci || []).length > 0 && aH("div", { style: { marginTop: 9, borderTop: `1px solid ${C.line}`, paddingTop: 8, display: "flex", flexDirection: "column", gap: 4, fontSize: 12 } },
             i.voci.map((x, k) => aH("div", { key: k, style: { display: "flex", justifyContent: "space-between" } }, aH("span", { style: { color: C.mut } }, x.nome), aH("span", { style: { fontFamily: "ui-monospace, monospace" } }, x.importo != null ? autoEu(x.importo) : "")))),
           i.straord > 0 && aH("div", { style: { fontSize: 10.5, color: C.faint, marginTop: 6 } }, "di cui straordinario " + autoEu(i.straord)),
@@ -6185,7 +6213,7 @@ function AutoKmModal({ d, onClose, onSave }) {
   const [data, setData] = useState(autoOggi());
   const [km, setKm] = useState(k ? String(k.km) : "");
   const n = Math.round(nIt(km));
-  const errore = !(n > 0) ? "Inserisci i km" : k && n < k.km ? "Meno dell'ultima lettura (" + autoKmIt(k.km) + " km)" : "";
+  const errore = !(n > 0) ? "Inserisci i km" : autoKmIncoerenti(d, data, n);
   return aH(AutoSheet, { titolo: "Aggiorna km", onClose: onClose },
     aH("div", { style: autoLbl }, "DATA"), aH("input", { type: "date", value: data, onChange: e => setData(e.target.value), style: autoInp }),
     aH("div", { style: autoLbl }, "KM SUL CONTACHILOMETRI"), aH("input", { inputMode: "numeric", value: km, onChange: e => setKm(e.target.value), style: { ...autoInp, fontFamily: "ui-monospace, monospace", fontSize: 22 } }),
@@ -6193,11 +6221,15 @@ function AutoKmModal({ d, onClose, onSave }) {
     aH("button", { disabled: !!errore, onClick: () => onSave({ data: data, km: n }), style: { ...autoBtn(true), width: "100%", marginTop: 16, opacity: errore ? .5 : 1 } }, "Salva lettura"));
 }
 
-function AutoScadenzaModal({ s, onClose, onSave }) {
+function AutoScadenzaModal({ d, s, onClose, onSave }) {
   const nuova = !s;
+  const [km, setKm] = useState("");
+  const kmN = Math.round(nIt(km));
+  const stima = autoKmStimati(d, autoOggi()) || (autoKmAttuali(d) || {}).km;
+  const kmErr = kmN > 0 ? autoKmIncoerenti(d, autoOggi(), kmN) : "";
   const [f, setF] = useState({ etichetta: s ? s.etichetta : "", scadenza: s ? s.scadenza : autoOggi(), importo: s && s.importo ? String(s.importo).replace(".", ",") : "", ripeti: s ? String(s.ripetiMesi || "") : "12", preavviso: s ? String(s.preavviso || 30) : "30", note: s ? s.note || "" : "" });
   const set = (k, v) => setF(x => ({ ...x, [k]: v }));
-  const payload = extra => Object.assign({ chiave: s ? s.chiave : undefined, etichetta: f.etichetta.trim(), scadenza: f.scadenza, importo: nIt(f.importo) || 0, ripetiMesi: Math.round(nIt(f.ripeti)) || 0, preavviso: Math.round(nIt(f.preavviso)) || 30, note: f.note }, extra || {});
+  const payload = extra => Object.assign({ chiave: s ? s.chiave : undefined, etichetta: f.etichetta.trim(), scadenza: f.scadenza, importo: nIt(f.importo) || 0, ripetiMesi: Math.round(nIt(f.ripeti)) || 0, preavviso: Math.round(nIt(f.preavviso)) || 30, note: f.note, km: kmN > 0 && !kmErr ? kmN : undefined, data: autoOggi() }, extra || {});
   const ok = f.etichetta.trim() && f.scadenza;
   const ripeti = Math.round(nIt(f.ripeti)) || 0;
   return aH(AutoSheet, { titolo: nuova ? "Nuova scadenza" : s.etichetta, onClose: onClose },
@@ -6209,7 +6241,12 @@ function AutoScadenzaModal({ s, onClose, onSave }) {
       aH("div", { style: { flex: 1 } }, aH("div", { style: autoLbl }, "AVVISO (GG)"), aH("input", { inputMode: "numeric", value: f.preavviso, onChange: e => set("preavviso", e.target.value), style: autoInp }))),
     aH("div", { style: autoLbl }, "NOTE"), aH("input", { value: f.note, onChange: e => set("note", e.target.value), style: autoInp }),
     aH("button", { disabled: !ok, onClick: () => onSave(payload()), style: { ...autoBtn(true), width: "100%", marginTop: 16, opacity: ok ? 1 : .5 } }, "Salva"),
-    !nuova && ripeti > 0 && aH("button", { onClick: () => onSave(payload({ rinnova: true })), style: { ...autoBtn(false), width: "100%", marginTop: 8 } }, "Rinnovata ✓ — sposta di " + ripeti + " mesi (" + autoDataIt(autoPiuMesi(f.scadenza, ripeti)) + ")"),
+    !nuova && ripeti > 0 && aH("div", { style: { ...autoCard, marginTop: 14, background: C.panel2 } },
+      aH("div", { style: { fontWeight: 700, fontSize: 13 } }, "L'hai rinnovata?"),
+      aH("div", { style: { ...autoLbl, marginTop: 8 } }, "KM DI OGGI (dal contachilometri)"),
+      aH("input", { inputMode: "numeric", value: km, placeholder: stima ? "≈ " + autoKmIt(Math.round(stima / 100) * 100) : "", onChange: e => setKm(e.target.value), style: { ...autoInp, fontFamily: "ui-monospace, monospace" } }),
+      kmErr && aH("div", { style: { fontSize: 11.5, color: C.amber, marginTop: 6 } }, kmErr),
+      aH("button", { disabled: !(kmN > 0) || !!kmErr, onClick: () => onSave(payload({ rinnova: true })), style: { ...autoBtn(false), width: "100%", marginTop: 10, opacity: kmN > 0 && !kmErr ? 1 : .5 } }, "Rinnovata ✓ — sposta di " + ripeti + " mesi (" + autoDataIt(autoPiuMesi(f.scadenza, ripeti)) + ")")),
     !nuova && ["RCA", "BOLLO", "REVISIONE"].indexOf(s.chiave) < 0 && aH("button", { onClick: () => onSave({ chiave: s.chiave, elimina: true }), style: { ...autoBtn(false), width: "100%", marginTop: 8, color: C.neg, background: "transparent" } }, "Elimina scadenza"));
 }
 
@@ -6220,7 +6257,8 @@ function AutoCbsModal({ d, onClose, onSave }) {
   const [v, setV] = useState(() => { const o = {}; cbs.forEach(p => { o[p.voce] = { traKm: "", entro: "" }; }); return o; });
   const set = (voce, campo, x) => setV(o => ({ ...o, [voce]: { ...o[voce], [campo]: x } }));
   const n = Math.round(nIt(km));
-  const save = () => onSave({ km: n > 0 ? n : undefined, data: autoOggi(), righe: cbs.map(p => ({ voce: p.voce, traKm: Math.round(nIt(v[p.voce].traKm)) || undefined, entro: v[p.voce].entro || undefined })).filter(x => x.traKm != null || x.entro) });
+  const kmErr = !(n > 0) ? "Inserisci i km di oggi" : autoKmIncoerenti(d, autoOggi(), n);
+  const save = () => { if (!kmErr) onSave({ km: n, data: autoOggi(), righe: cbs.map(p => ({ voce: p.voce, traKm: Math.round(nIt(v[p.voce].traKm)) || undefined, entro: v[p.voce].entro || undefined })).filter(x => x.traKm != null || x.entro) }); };
   return aH(AutoSheet, { titolo: "Copia dal computer di bordo", onClose: onClose },
     aH("div", { style: { fontSize: 11.5, color: C.mut, marginTop: 6, lineHeight: 1.45 } }, "Sul cruscotto: menu Veicolo → Stato del veicolo (Service). Scrivi solo le voci che vedi; le altre restano come sono."),
     aH("div", { style: autoLbl }, "KM ATTUALI"), aH("input", { inputMode: "numeric", value: km, onChange: e => setKm(e.target.value), style: { ...autoInp, fontFamily: "ui-monospace, monospace" } }),
@@ -6229,7 +6267,8 @@ function AutoCbsModal({ d, onClose, onSave }) {
       aH("div", { style: { display: "flex", gap: 8 } },
         aH("input", { inputMode: "numeric", placeholder: "tra … km", value: v[p.voce].traKm, onChange: e => set(p.voce, "traKm", e.target.value), style: { ...autoInp, flex: 1 } }),
         aH("input", { type: "month", value: v[p.voce].entro, onChange: e => set(p.voce, "entro", e.target.value), style: { ...autoInp, flex: 1 } })))),
-    aH("button", { onClick: save, style: { ...autoBtn(true), width: "100%", marginTop: 16 } }, "Salva valori"));
+    kmErr && aH("div", { style: { fontSize: 11.5, color: C.amber, marginTop: 8 } }, kmErr),
+    aH("button", { disabled: !!kmErr, onClick: save, style: { ...autoBtn(true), width: "100%", marginTop: 16, opacity: kmErr ? .5 : 1 } }, "Salva valori"));
 }
 
 function AutoVoceModal({ p, onClose, onSave }) {
@@ -6291,10 +6330,13 @@ function AutoInterventoModal({ d, i, onClose, onSave, onDelete }) {
   const rateN = rate || autoRate(costoN, Math.round(nIt(nRate)) || 1, dataPag, 1);
   const sommaRate = rateN.reduce((t, r) => t + (nIt(r.importo) || 0), 0);
   const rateOk = modo !== "RATE" || Math.abs(sommaRate - costoN) < 0.01;
-  const errore = !tipi.length ? "Scegli almeno un tipo" : !data ? "Manca la data" : !(costoN >= 0) ? "Costo non valido" : !rateOk ? "Le rate sommano " + autoEu(sommaRate) + ", il costo è " + autoEu(costoN) : "";
+  const kmN = Math.round(nIt(km));
+  const kmStima = autoKmStimati(d, data);
+  const kmErr = kmN > 0 ? autoKmIncoerenti(d, data, kmN, i ? i.id : undefined) : nuovo ? "Mancano i km (li trovi in fattura o sul contachilometri)" : "";
+  const errore = !tipi.length ? "Scegli almeno un tipo" : !data ? "Manca la data" : kmErr ? kmErr : !(costoN >= 0) ? "Costo non valido" : !rateOk ? "Le rate sommano " + autoEu(sommaRate) + ", il costo è " + autoEu(costoN) : "";
   const save = () => {
     if (errore) return;
-    const p = { id: i ? i.id : undefined, data: data, km: Math.round(nIt(km)) || null, tipi: tipi, officina: officina.trim(), costo: Math.round(costoN * 100) / 100, straord: nIt(straord) > 0 ? nIt(straord) : 0, note: note.trim(), voci: voci.filter(v => v.nome.trim()).map(v => ({ nome: v.nome.trim(), importo: nIt(v.importo) >= 0 ? nIt(v.importo) : null })) };
+    const p = { id: i ? i.id : undefined, data: data, km: kmN > 0 ? kmN : null, tipi: tipi, officina: officina.trim(), costo: Math.round(costoN * 100) / 100, straord: nIt(straord) > 0 ? nIt(straord) : 0, note: note.trim(), voci: voci.filter(v => v.nome.trim()).map(v => ({ nome: v.nome.trim(), importo: nIt(v.importo) >= 0 ? nIt(v.importo) : null })) };
     if (nuovo) p.uscite = { modo: costoN > 0 ? modo : "NESSUNA", pay: pay, rate: modo === "RATE" ? rateN.map(r => ({ data: r.data, importo: nIt(r.importo) })) : modo === "UNICA" ? [{ data: dataPag, importo: costoN }] : [] };
     if (nIt(olioTra) > 0) p.cbs = [{ voce: "Olio motore", traKm: Math.round(nIt(olioTra)) }];
     onSave(p);
@@ -6305,7 +6347,8 @@ function AutoInterventoModal({ d, i, onClose, onSave, onDelete }) {
     aH("div", { style: { display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 6, marginTop: 6 } }, AUTO_TIPI.map(t => aH("button", { key: t, onClick: () => toggleTipo(t), style: { minHeight: 40, borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: "pointer", background: tipi.indexOf(t) >= 0 ? C.panel2 : C.panel, color: tipi.indexOf(t) >= 0 ? C.disp : C.mut, border: `1px solid ${tipi.indexOf(t) >= 0 ? C.disp : C.line}` } }, AUTO_TIPI_LAB[t]))),
     aH("div", { style: { display: "flex", gap: 8 } },
       aH("div", { style: { flex: 1 } }, aH("div", { style: autoLbl }, "DATA"), aH("input", { type: "date", value: data, onChange: e => { setData(e.target.value); if (nuovo) { setDataPag(e.target.value); setRate(null); } }, style: autoInp })),
-      aH("div", { style: { flex: 1 } }, aH("div", { style: autoLbl }, "KM"), aH("input", { inputMode: "numeric", value: km, onChange: e => setKm(e.target.value), style: { ...autoInp, fontFamily: "ui-monospace, monospace" } }))),
+      aH("div", { style: { flex: 1 } }, aH("div", { style: autoLbl }, "KM *"), aH("input", { inputMode: "numeric", value: km, placeholder: kmStima ? "≈ " + autoKmIt(Math.round(kmStima / 100) * 100) : "", onChange: e => setKm(e.target.value), style: { ...autoInp, fontFamily: "ui-monospace, monospace", borderColor: kmErr ? C.amber : C.line } }))),
+    kmErr && aH("div", { style: { fontSize: 11, color: C.amber, marginTop: 5 } }, kmErr),
     aH("div", { style: autoLbl }, "OFFICINA"),
     aH("input", { list: "auto-off", value: officina, onChange: e => setOfficina(e.target.value), style: autoInp }),
     aH("datalist", { id: "auto-off" }, officine.map(o => aH("option", { key: o, value: o }))),
@@ -6370,7 +6413,7 @@ function AutoCorreggiModal({ inc, onClose, onConferma }) {
 function AutoModali({ m, auto, onClose, onCall }) {
   if (!m || !auto) return null;
   if (m.tipo === "km") return aH(AutoKmModal, { d: auto, onClose: onClose, onSave: p => onCall("autoSalvaKm", p, "Km salvati ✓") });
-  if (m.tipo === "scadenza") return aH(AutoScadenzaModal, { s: m.s, onClose: onClose, onSave: p => onCall("autoSalvaScadenza", p, p.elimina ? "Scadenza eliminata ✓" : p.rinnova ? "Scadenza rinnovata ✓" : "Scadenza salvata ✓") });
+  if (m.tipo === "scadenza") return aH(AutoScadenzaModal, { d: auto, s: m.s, onClose: onClose, onSave: p => onCall("autoSalvaScadenza", p, p.elimina ? "Scadenza eliminata ✓" : p.rinnova ? "Scadenza rinnovata ✓" : "Scadenza salvata ✓") });
   if (m.tipo === "cbs") return aH(AutoCbsModal, { d: auto, onClose: onClose, onSave: p => onCall("autoSalvaPiano", p, "Valori del computer di bordo salvati ✓") });
   if (m.tipo === "voce") return aH(AutoVoceModal, { p: m.p, onClose: onClose, onSave: p => onCall("autoSalvaPiano", p, "Piano aggiornato ✓") });
   if (m.tipo === "intervento") return aH(AutoInterventoModal, { d: auto, i: m.i, onClose: onClose, onSave: p => onCall("autoSalvaIntervento", p, res => "Intervento salvato ✓" + (res && res.righeUscite ? " · " + res.righeUscite + (res.righeUscite === 1 ? " riga" : " righe") + " in USCITE" : "")), onDelete: i => onCall("autoEliminaIntervento", { id: i.id }, "Intervento eliminato ✓") });
