@@ -99,13 +99,14 @@
     ::-webkit-scrollbar { height: 8px; width: 8px; }
     ::-webkit-scrollbar-thumb { background: #27384B; border-radius: 8px; }
 
-    #root > div > div:first-child {
+    /* SPAZIO SOTTO LA BARRA IN BASSO. Qui c'erano due regole,
+       `div:first-child` (96px) e `div:last-child` (solo la safe area): ma il
+       contenitore dell'app e' l'UNICO figlio, quindi e' primo E ultimo, e la
+       seconda regola vinceva. Risultato: la fine di ogni pagina restava sotto
+       la barra fissa, irraggiungibile (il pulsante "+ Intervento" dell'Auto). */
+    #root > div > .app-container {
       padding-top: env(safe-area-inset-top) !important;
-      padding-bottom: calc(96px + env(safe-area-inset-bottom)) !important;
-    }
-
-    #root > div > div:last-child {
-      padding-bottom: env(safe-area-inset-bottom) !important;
+      padding-bottom: calc(104px + env(safe-area-inset-bottom)) !important;
     }
 
     /* Il microfono che sta ascoltando: pulsa, cosi' si vede a colpo d'occhio
@@ -239,8 +240,22 @@ const idb = (() => {
     motivo: () => motivo
   };
 })();
-async function stSave(name, obj) { try { await idb.set(K + name, JSON.stringify(obj)); return true; } catch (e) { return false; } }
-async function stLoad(name) { try { const v = await idb.get(K + name); return v == null ? null : JSON.parse(v); } catch (e) { return null; } }
+/* COPIA LOCALE ISTANTANEA. Su iPhone l'app vive in un iframe di
+   googleusercontent.com e IndexedDB li' puo' non rispondere (vedi sopra):
+   allora la cache non arrivava mai e ogni apertura aspettava il foglio,
+   ~10 secondi. I dati che servono ad APRIRE l'app (payload principale e
+   Auto) si tengono anche in localStorage, che si legge in modo sincrono:
+   lo schermo si riempie subito con l'ultima copia e il foglio la aggiorna
+   appena risponde. Solo queste chiavi: le chat non devono riempire i 5 MB. */
+const LS_CHIAVI = ["payload2", "auto1"];
+const lsSet = (name, s) => { if (LS_CHIAVI.indexOf(name) < 0) return false; try { localStorage.setItem(K + name, s); return true; } catch (e) { return false; } };
+const lsGet = name => { if (LS_CHIAVI.indexOf(name) < 0) return null; try { return localStorage.getItem(K + name); } catch (e) { return null; } };
+async function stSave(name, obj) { const s = JSON.stringify(obj); const inLs = lsSet(name, s); try { await idb.set(K + name, s); return true; } catch (e) { return inLs; } }
+async function stLoad(name) {
+  const s = lsGet(name);
+  if (s) { try { return JSON.parse(s); } catch (e) {} }
+  try { const v = await idb.get(K + name); return v == null ? null : JSON.parse(v); } catch (e) { return null; }
+}
 const hasBackend = () => typeof google !== "undefined" && google.script && google.script.run;
 const msgErr = e => (e && e.message) ? e.message : String(e || "errore sconosciuto");
 
@@ -6030,7 +6045,7 @@ function AutoCruscotto({ d, r, inc, oggi, onApri, onCall, setSub }) {
   const v = d.veicolo || {};
   const statoLab = r.stato === "scaduto" ? ["SCADUTO", C.neg] : r.stato === "urgente" ? ["IN SCADENZA", C.amber] : ["IN REGOLA", C.disp];
   const ult = r.ultimo;
-  const col = ult ? autoCollegate(d, ult) : [];
+  const col = (ult ? autoCollegate(d, ult) : []).slice().sort((a, b) => a.data < b.data ? -1 : a.data > b.data ? 1 : 0);
   const pagate = col.filter(u => u.paid).length, sommaCol = col.reduce((s, u) => s + u.importo, 0);
   const prossima = col.filter(u => !u.paid).sort((a, b) => a.data < b.data ? -1 : 1)[0];
   const n = d.notifiche || {}, uc = n.ultimo || null;
@@ -6080,7 +6095,7 @@ function AutoCruscotto({ d, r, inc, oggi, onApri, onCall, setSub }) {
       aH("div", { style: { fontSize: 11, color: C.mut, marginTop: 4, lineHeight: 1.45 } },
         n.trigger
           ? "Controllo ogni mattina alle 7. " + (uc ? "Ultimo: " + autoDataIt(String(uc.ts || "").slice(0, 10)) + " · email " + (uc.email || 0) + " · eventi " + (uc.eventi || 0) + (uc.errori && uc.errori.length ? " · " + uc.errori.join("; ") : "") : "")
-          : "Attivali una volta: crea il controllo giornaliero, gli eventi su Google Calendar e manda le email a 30, 7 e 1 giorno dalla scadenza. Se compare un errore di permessi, segui AUTO.md."),
+          : "Attivali una volta: crea il controllo giornaliero, gli eventi su Google Calendar e le email al preavviso, a 7 e a 1 giorno dalla scadenza. Tiene anche pronti i dati, così l'app si apre subito. Se compare un errore di permessi, segui AUTO.md."),
       aH("div", { style: { display: "flex", gap: 8, marginTop: 10 } },
         !n.trigger && aH("button", { onClick: () => onCall("installaTriggerAuto", null, "Promemoria attivati ✓"), style: { ...autoBtn(true), flex: 1 } }, "Attiva promemoria"),
         aH("button", { onClick: () => onCall("autoControlloScadenze", { prova: true }, res => "Controllo fatto: email " + ((res && res.email && res.email.n) || 0) + ", eventi " + ((res && res.calendar && res.calendar.n) || 0)), style: { ...autoBtn(false), flex: 1 } }, "Controlla ora"))),
@@ -6430,7 +6445,7 @@ function TabBar({ tab, setTab, badge }) {
      dell'auto entro il loro preavviso. */
   const items = [["home", "Panoramica", "▤"], ["analisi", "Analisi", "◵"], ["add", "Aggiungi", "＋"], ["ia", "Chiedi", "✦"], ["bollette", "Bollette", "⚡"], ["auto", "Auto", "🚗"], ["list", "Movimenti", "≣"]];
   const b = badge || {};
-  return React.createElement("div", { style: { position: "fixed", bottom: 0, left: 0, right: 0, background: "rgba(14,22,32,.92)", backdropFilter: "blur(8px)", borderTop: `1px solid ${C.line}` } }, React.createElement("div", { style: { maxWidth: 480, margin: "0 auto", display: "flex" } }, items.map(([k, t, ic]) => React.createElement("button", { key: k, onClick: () => setTab(k), "aria-label": b[k] ? t + ", " + b[k] + " avvisi" : t, style: { flex: 1, minWidth: 0, background: "none", border: "none", cursor: "pointer", padding: "12px 0 16px", color: tab === k ? C.disp : C.mut, display: "flex", flexDirection: "column", alignItems: "center", gap: 3 } }, React.createElement("span", { style: { fontSize: 20, lineHeight: 1, position: "relative" } }, ic, b[k] > 0 && React.createElement("span", { style: { position: "absolute", top: -4, right: -9, minWidth: 15, height: 15, borderRadius: 8, background: C.amber, color: "#08131C", fontSize: 9, fontWeight: 800, lineHeight: "15px", textAlign: "center", padding: "0 3px" } }, b[k])), React.createElement("span", { style: { fontSize: 8.5, fontWeight: 600, letterSpacing: .1, whiteSpace: "nowrap" } }, t)))));
+  return React.createElement("div", { style: { position: "fixed", bottom: 0, left: 0, right: 0, background: "rgba(14,22,32,.92)", backdropFilter: "blur(8px)", borderTop: `1px solid ${C.line}` } }, React.createElement("div", { style: { maxWidth: 480, margin: "0 auto", display: "flex" } }, items.map(([k, t, ic]) => React.createElement("button", { key: k, onClick: () => setTab(k), "aria-label": b[k] ? t + ", " + b[k] + " avvisi" : t, style: { flex: 1, minWidth: 0, background: "none", border: "none", cursor: "pointer", padding: "12px 0 16px", paddingBottom: "calc(16px + env(safe-area-inset-bottom))", color: tab === k ? C.disp : C.mut, display: "flex", flexDirection: "column", alignItems: "center", gap: 3 } }, React.createElement("span", { style: { fontSize: 20, lineHeight: 1, position: "relative" } }, ic, b[k] > 0 && React.createElement("span", { style: { position: "absolute", top: -4, right: -9, minWidth: 15, height: 15, borderRadius: 8, background: C.amber, color: "#08131C", fontSize: 9, fontWeight: 800, lineHeight: "15px", textAlign: "center", padding: "0 3px" } }, b[k])), React.createElement("span", { style: { fontSize: 8.5, fontWeight: 600, letterSpacing: .1, whiteSpace: "nowrap" } }, t)))));
 }
 
 try {

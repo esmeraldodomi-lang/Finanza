@@ -99,10 +99,24 @@ anche prima del modulo Auto): vanno riallineati.
    ```
    I primi due servono a fogli e assistente IA (`IA_FINANZE.md`), gli altri
    quattro ai promemoria del modulo Auto (`AUTO.md`, §4).
-3. Una volta sola, dall'editor: eseguire `installaTriggerAuto` e concedere i
-   permessi (crea il controllo giornaliero delle scadenze auto).
+3. Una volta sola, dall'editor (o dal pulsante "Attiva promemoria" nel tab
+   Auto): eseguire `installaTriggerAuto` e concedere i permessi. Crea tre
+   trigger: il controllo giornaliero delle scadenze auto, `scaldaCache` ogni 5
+   minuti e `foglioModificato` a ogni modifica del foglio (vedi sotto).
 4. **Distribuisci → Gestisci distribuzioni → Modifica → Nuova versione**: la web
    app usa gli scope della versione pubblicata.
+
+### Apertura veloce
+
+L'app si apriva dopo ~10 secondi perché la cache del server durava 5 minuti e
+quella del telefono (IndexedDB) su iPhone spesso non risponde. Ora:
+- **telefono**: payload principale e Auto si tengono anche in `localStorage`;
+  all'apertura lo schermo si riempie subito con l'ultima copia e il foglio la
+  aggiorna appena risponde (l'icona ⟳ in alto dice quanto è vecchia);
+- **server**: cache di 6 ore, buttata a ogni modifica (dall'app o a mano sul
+  foglio, trigger `foglioModificato`) e ricostruita in background da
+  `scaldaCache`. Una "generazione" impedisce che un ricalcolo partito prima di
+  una modifica rimetta in cache un dato vecchio.
 
 Al primo accesso al tab Auto vengono creati i fogli `AUTO_INTERVENTI`,
 `AUTO_KM`, `AUTO_SCADENZE`, `AUTO_PIANO` con i dati di partenza.

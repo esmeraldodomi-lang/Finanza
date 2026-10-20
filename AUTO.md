@@ -106,7 +106,8 @@ Se manca un permesso, il controllo lo dice (nel cruscotto, riquadro Promemoria) 
 | `autoSalvaPiano({km, righe})` | Valori CBS (`traKm`, `entro`) o voce del piano |
 | `autoCorreggi(azione)` | Applica una correzione proposta (`crea`, `date`, `stato`) |
 | `autoControlloScadenze(opz)` | Email + Calendar (trigger giornaliero) |
-| `installaTriggerAuto()` | Crea il trigger e lancia il primo controllo |
+| `installaTriggerAuto()` | Crea il trigger giornaliero, quelli della cache (`installaTriggerCache`) e lancia il primo controllo |
+| `scaldaCache()` / `foglioModificato()` | Trigger della cache: la ricostruiscono ogni 5 minuti se manca, la buttano a ogni modifica a mano del foglio (README §4, "Apertura veloce") |
 
 ---
 

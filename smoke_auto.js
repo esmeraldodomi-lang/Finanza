@@ -91,7 +91,7 @@ const USCITE = () => [H_USCITE,
 
 /* ---------------- ambiente Apps Script finto ---------------- */
 function ambiente(fogli, oggiIso) {
-  const store = {}, mails = [], eventi = {}, triggers = [];
+  const store = {}, mails = [], eventi = {}, triggers = [], cache = {};
   let seq = 0;
   const cal = {
     createAllDayEvent: (titolo, d, opt) => { const id = 'ev' + (++seq); eventi[id] = { id, titolo, data: d, desc: opt && opt.description, rem: [] }; return evento(id); },
@@ -104,7 +104,11 @@ function ambiente(fogli, oggiIso) {
   const ctx = {
     console,
     SpreadsheetApp: { openById: () => Cartella(fogli) },
-    CacheService: { getScriptCache: () => ({ get: () => null, getAll: () => ({}), put: () => {}, putAll: () => {}, removeAll: () => {} }) },
+    CacheService: { getScriptCache: () => ({
+      get: k => cache.hasOwnProperty(k) ? cache[k] : null,
+      getAll: ks => { const o = {}; ks.forEach(k => { if (cache.hasOwnProperty(k)) o[k] = cache[k]; }); return o; },
+      put: (k, v) => { cache[k] = v; }, putAll: m => { Object.keys(m).forEach(k => { cache[k] = m[k]; }); },
+      removeAll: ks => ks.forEach(k => { delete cache[k]; }) }) },
     PropertiesService: { getScriptProperties: () => ({ getProperty: k => store.hasOwnProperty(k) ? store[k] : null, setProperty: (k, v) => { store[k] = String(v); } }) },
     LockService: { getScriptLock: () => ({ waitLock: () => {}, releaseLock: () => {} }) },
     Session: { getScriptTimeZone: () => 'Europe/Rome', getEffectiveUser: () => ({ getEmail: () => 'proprietario@example.org' }) },
@@ -115,7 +119,7 @@ function ambiente(fogli, oggiIso) {
     ScriptApp: {
       getProjectTriggers: () => triggers.slice(),
       deleteTrigger: t => { const i = triggers.indexOf(t); if (i >= 0) triggers.splice(i, 1); },
-      newTrigger: fn => { const t = { fn, getHandlerFunction: () => fn }; const ch = { timeBased: () => ch, everyDays: n => { t.ogni = n; return ch; }, atHour: h => { t.ora = h; return ch; }, create: () => { triggers.push(t); return t; } }; return ch; }
+      newTrigger: fn => { const t = { fn, getHandlerFunction: () => fn }; const ch = { timeBased: () => ch, everyDays: n => { t.ogni = n; return ch; }, everyMinutes: n => { t.minuti = n; return ch; }, atHour: h => { t.ora = h; return ch; }, forSpreadsheet: id => { t.foglio = id; return ch; }, onChange: () => { t.onChange = true; return ch; }, create: () => { triggers.push(t); return t; } }; return ch; }
     }
   };
   vm.createContext(ctx);
@@ -123,8 +127,8 @@ function ambiente(fogli, oggiIso) {
   ctx.__OGGI = oggiIso;
   vm.runInContext("(function(D){ function F(){ var a = Array.prototype.slice.call(arguments); if (!a.length) { var m = __OGGI.split('-'); return new D(+m[0], +m[1]-1, +m[2], 9, 0, 0); } return new (Function.prototype.bind.apply(D, [null].concat(a)))(); } F.prototype = D.prototype; F.now = function(){ return new F().getTime(); }; F.UTC = D.UTC; F.parse = D.parse; Date = F; })(Date);", ctx);
   new vm.Script(fs.readFileSync(path.join(__dirname, 'FINANZE.gs'), 'utf8') +
-    '\n;this.API = { buildAuto_, getDatiAuto, autoSalvaIntervento, autoEliminaIntervento, autoSalvaKm, autoSalvaScadenza, autoSalvaPiano, autoCorreggi, autoControlloScadenze, installaTriggerAuto, autoNum_ };').runInContext(ctx);
-  return { API: ctx.API, ctx, store, mails, eventi, triggers, oggi: v => { ctx.__OGGI = v; } };
+    '\n;this.API = { buildAuto_, getDatiAuto, conCache_, cacheClear_, scaldaCache, foglioModificato, installaTriggerCache, autoSalvaIntervento, autoEliminaIntervento, autoSalvaKm, autoSalvaScadenza, autoSalvaPiano, autoCorreggi, autoControlloScadenze, installaTriggerAuto, autoNum_ };').runInContext(ctx);
+  return { API: ctx.API, ctx, store, mails, eventi, triggers, cache, oggi: v => { ctx.__OGGI = v; } };
 }
 
 /* ---------------- il motore del client ---------------- */
@@ -348,18 +352,42 @@ console.log('\n9) Promemoria: email alle soglie e Calendar');
   esito(amb.mails.length === m0 + 1, 'e non consuma le soglie vere');
   esito(JSON.parse(amb.store.AUTO_ULTIMO_CONTROLLO).eventi > 0, 'l\'esito dell\'ultimo controllo si legge nel payload');
   r = A.installaTriggerAuto();
-  esito(r.ok && amb.triggers.length === 1 && amb.triggers[0].fn === 'autoControlloScadenze' && amb.triggers[0].ora === 7, 'trigger giornaliero alle 7');
+  const tr = n => amb.triggers.filter(t => t.fn === n);
+  esito(r.ok && tr('autoControlloScadenze').length === 1 && tr('autoControlloScadenze')[0].ora === 7, 'trigger giornaliero alle 7', r.error);
+  esito(tr('scaldaCache').length === 1 && tr('scaldaCache')[0].minuti === 5, 'cache: riscaldamento ogni 5 minuti');
+  esito(tr('foglioModificato').length === 1 && tr('foglioModificato')[0].onChange && !!tr('foglioModificato')[0].foglio, 'cache: buttata a ogni modifica a mano del foglio (onChange)');
   A.installaTriggerAuto();
-  esito(amb.triggers.length === 1, 'rieseguirlo non duplica il trigger');
+  esito(amb.triggers.length === 3, 'rieseguirlo non duplica i trigger', amb.triggers.length);
   esito(!!A.buildAuto_().notifiche.trigger, 'il payload sa che i promemoria sono attivi');
 }
 
-/* ---------------- 10) la pagina vera ---------------- */
+console.log('\n10) Cache del server: calda, mai vecchia');
+{
+  const A = amb.API, K0 = 'FIN4_auto';
+  A.cacheClear_();
+  esito(!amb.cache[K0], 'dopo una modifica la cache Auto non c\'è');
+  let r = A.scaldaCache();
+  esito(r.ok && r.ricostruite.some(x => /^auto ok/.test(x)) && !!amb.cache[K0], 'scaldaCache la ricostruisce', JSON.stringify(r.ricostruite));
+  r = A.scaldaCache();
+  esito(r.ricostruite.filter(x => /^auto/.test(x)).length === 0, 'se è già calda non rilegge il foglio');
+  const d1 = A.getDatiAuto();
+  esito(d1.daCache === true, 'l\'app la trova pronta (daCache)');
+  A.foglioModificato({});
+  esito(!amb.cache[K0], 'modifica a mano del foglio → cache buttata');
+  // ricalcolo che parte PRIMA di una modifica e finisce DOPO: non deve finire in cache
+  A.conCache_('auto', true, () => { A.cacheClear_(); return { v: 1, vecchio: true }; }, 'prova');
+  esito(!amb.cache[K0], 'un ricalcolo superato da una modifica non scrive dati vecchi in cache');
+  A.conCache_('auto', true, () => ({ v: 1 }), 'prova');
+  esito(!!amb.cache[K0], 'un ricalcolo normale sì');
+  A.cacheClear_();
+}
+
+/* ---------------- 11) la pagina vera ---------------- */
 (async () => {
   let JSDOM;
   try { JSDOM = require('jsdom').JSDOM; require('react'); require('react-dom/client'); } catch (e) { JSDOM = null; }
-  if (!JSDOM) { console.log('\n10) Pagina: SALTATA (manca jsdom/react: npm i jsdom react@18 react-dom@18)'); fine(); return; }
-  console.log('\n10) Pagina: il tab Auto in jsdom');
+  if (!JSDOM) { console.log('\n11) Pagina: SALTATA (manca jsdom/react: npm i jsdom react@18 react-dom@18)'); fine(); return; }
+  console.log('\n11) Pagina: il tab Auto in jsdom');
   const blocchi = []; { const re = /<script(?![^>]*\ssrc=)[^>]*>([\s\S]*?)<\/script>/g; let m; while ((m = re.exec(html))) if (m[1].trim()) blocchi.push(m[1]); }
   const PAYLOAD = {
     v: 6, anni: [2026],
@@ -375,13 +403,16 @@ console.log('\n9) Promemoria: email alle soglie e Calendar');
     Object.keys(require.cache).forEach(k => { if (/node_modules[\\/](react|react-dom|scheduler)[\\/]/.test(k)) delete require.cache[k]; });
     return { React: require('react'), ReactDOM: require('react-dom/client') };
   }
-  function avvia(conAuto) {
+  function avvia(conAuto, opz) {
+    opz = opz || {};
     const dom = new JSDOM(html.replace(/<script[^>]*\ssrc=[^>]*><\/script>/g, ''), { runScripts: 'outside-only', pretendToBeVisual: true, url: 'https://example.org/' });
     const w = dom.window, libs = reactPerFinestra(w);
+    if (opz.idbMuto) w.indexedDB = { open: () => ({}) };
+    if (opz.ls) Object.keys(opz.ls).forEach(k => w.localStorage.setItem(k, opz.ls[k]));
     w.React = libs.React; w.ReactDOM = libs.ReactDOM;
     const run = () => {
       let ok = null; const p = { withSuccessHandler(f) { ok = f; return p; }, withFailureHandler() { return p; },
-        getDatiFinanze() { setTimeout(() => ok(PAYLOAD), 0); }, getDatiEntrate() { setTimeout(() => ok({ rows: [], anni: [] }), 0); } };
+        getDatiFinanze() { if (opz.muto) return; setTimeout(() => ok(PAYLOAD), 0); }, getDatiEntrate() { setTimeout(() => ok({ rows: [], anni: [] }), 0); } };
       if (conAuto) p.getDatiAuto = () => setTimeout(() => ok(AUTO), 0);
       return p;
     };
@@ -426,6 +457,18 @@ console.log('\n9) Promemoria: email alle soglie e Calendar');
     esito(w.__FIN_MOUNTED__ === true && /Panoramica/.test(testo(w)), 'backend senza getDatiAuto: l\'app parte lo stesso');
     tabAuto(w); await attendi(80);
     esito(/Impossibile leggere i fogli AUTO|aggiorna FINANZE\.gs/.test(testo(w)), 'e il tab Auto dice cosa manca', testo(w).slice(0, 160));
+  }
+  {
+    // iPhone: IndexedDB non risponde, il foglio ci mette secondi. Con la
+    // copia in localStorage lo schermo si riempie SUBITO.
+    const prima = avvia(true);
+    await attendi(150);
+    const salvato = prima.localStorage.getItem('fin:payload2');
+    esito(!!salvato && !!prima.localStorage.getItem('fin:auto1'), 'payload e Auto copiati in localStorage');
+    esito(!prima.localStorage.getItem('fin:chats') , 'le chat non vanno in localStorage');
+    const w = avvia(true, { idbMuto: true, muto: true, ls: { 'fin:payload2': salvato } });
+    await attendi(60);
+    esito(/Panoramica/.test(testo(w)) && !/Carico i dati/.test(testo(w)), 'foglio che non risponde + IndexedDB muto: l\'app si apre subito dalla copia locale');
   }
   fine();
 })();

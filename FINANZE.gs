@@ -98,7 +98,13 @@ function err_(e, dove) {
    limite e' 100 KB per chiave) e viene buttato via a OGNI scrittura, cosi'
    la cache non puo' mostrare un dato vecchio dopo una modifica fatta
    dall'app. Per una modifica fatta a mano sul foglio c'e' `forza`. */
-var CACHE_TTL = 300;      // 5 minuti
+/* 6 ore (il massimo di CacheService). Con 5 minuti quasi ogni apertura
+   trovava la cache scaduta e rileggeva tutto: ~10 secondi di attesa. Ora
+   la cache non invecchia male perche' viene buttata a OGNI modifica: quelle
+   fatte dall'app (cacheClear_) e quelle fatte a mano sul foglio (trigger
+   onChange -> foglioModificato), e scaldaCache la ricostruisce in
+   background ogni 5 minuti se manca. */
+var CACHE_TTL = 21600;
 var CACHE_PEZZO = 40000;  // caratteri per chiave (sotto i 100 KB anche con accenti)
 var CACHE_MAX_PEZZI = 24;
 
@@ -134,7 +140,14 @@ function cachePut_(n, obj) {
     c.put(cacheK_(n), JSON.stringify({ pezzi: pezzi, ts: new Date().toISOString() }), CACHE_TTL);
   } catch (e) {}
 }
+/* GENERAZIONE DELLA CACHE. Un ricalcolo che legge il foglio PRIMA di una
+   modifica e scrive in cache DOPO la cancellazione rimetterebbe in cache un
+   dato vecchio, e con 6 ore di vita lo terrebbe a lungo. Ogni cancellazione
+   alza la generazione; un ricalcolo scrive in cache solo se la generazione
+   e' la stessa di quando ha iniziato. */
+function cacheGen_() { try { return PropertiesService.getScriptProperties().getProperty('CACHE_GEN') || '0'; } catch (e) { return '0'; } }
 function cacheClear_() {
+  try { PropertiesService.getScriptProperties().setProperty('CACHE_GEN', String(new Date().getTime()) + Math.random().toString(36).slice(2, 6)); } catch (e) {}
   try {
     var nomi = ['finanze', 'bollette', 'risc', 'entrate', 'auto'], tutte = [];
     for (var k = 0; k < nomi.length; k++) {
@@ -149,12 +162,49 @@ function svuotaCache() { cacheClear_(); return { ok: true }; }
 function conCache_(nome, forza, fn, dove) {
   try {
     if (!forza) { var c = cacheGet_(nome); if (c) return c; }
-    var t0 = new Date().getTime();
+    var t0 = new Date().getTime(), gen = cacheGen_();
     var out = fn();
     if (!out) return err_('payload vuoto', dove);
-    if (!out.error) { out.msTot = new Date().getTime() - t0; cachePut_(nome, out); }
+    if (!out.error) { out.msTot = new Date().getTime() - t0; if (cacheGen_() === gen) cachePut_(nome, out); }
     return out;
   } catch (e) { return err_(e, dove); }
+}
+
+/* ---- CACHE SEMPRE CALDA ----
+   scaldaCache gira ogni 5 minuti (trigger): se il payload principale o
+   quello dell'Auto non e' in cache, lo ricostruisce. Cosi' l'app trova
+   quasi sempre la cache pronta e risponde in 1-2 secondi invece di 10.
+   foglioModificato (trigger onChange del foglio) butta la cache quando il
+   foglio si modifica a mano: il dato vecchio non resta in giro. */
+var CACHE_CALDE = [['finanze', 'buildFinanze_'], ['auto', 'buildAuto_']];
+function scaldaCache() {
+  var fatte = [];
+  CACHE_CALDE.forEach(function (c) {
+    var testa = null;
+    try { testa = CacheService.getScriptCache().get(cacheK_(c[0])); } catch (e) {}
+    if (testa) return;
+    var fn = c[1] === 'buildFinanze_' ? buildFinanze_ : buildAuto_;
+    var out = conCache_(c[0], true, fn, 'scaldaCache ' + c[0]);
+    fatte.push(c[0] + (out && out.error ? ' ERRORE ' + out.error : ' ok'));
+  });
+  return { ok: true, ricostruite: fatte };
+}
+function foglioModificato(e) { cacheClear_(); }
+/* Crea (una volta) i due trigger della cache. Rieseguirlo non li duplica. */
+function installaTriggerCache() {
+  try {
+    var tr = ScriptApp.getProjectTriggers();
+    for (var i = 0; i < tr.length; i++) {
+      var h = tr[i].getHandlerFunction();
+      if (h === 'scaldaCache' || h === 'foglioModificato') ScriptApp.deleteTrigger(tr[i]);
+    }
+    ScriptApp.newTrigger('scaldaCache').timeBased().everyMinutes(5).create();
+    ScriptApp.newTrigger('foglioModificato').forSpreadsheet(CONFIG.SHEET_ID).onChange().create();
+    PropertiesService.getScriptProperties().setProperty('CACHE_TRIGGER', new Date().toISOString());
+    return { ok: true, scalda: scaldaCache() };
+  } catch (e) {
+    return err_(e, 'installaTriggerCache');
+  }
 }
 
 /* --- funzioni "ponte" chiamabili dall'app React ---
@@ -1791,15 +1841,18 @@ function autoControlloScadenze(opz) {
   }
 }
 /* Da eseguire UNA volta (dall'editor o dal pulsante dell'app): crea il
-   controllo giornaliero alle 7 e lancia subito il primo. */
+   controllo giornaliero alle 7, i trigger della cache (installaTriggerCache)
+   e lancia subito il primo controllo. */
 function installaTriggerAuto() {
   try {
     var tr = ScriptApp.getProjectTriggers();
     for (var i = 0; i < tr.length; i++) if (tr[i].getHandlerFunction() === 'autoControlloScadenze') ScriptApp.deleteTrigger(tr[i]);
     ScriptApp.newTrigger('autoControlloScadenze').timeBased().everyDays(1).atHour(7).create();
     PropertiesService.getScriptProperties().setProperty('AUTO_TRIGGER', new Date().toISOString());
+    var cache = installaTriggerCache();
+    if (cache && cache.error) return { error: 'Promemoria attivati, ma i trigger della cache no: ' + cache.error };
     var primo = autoControlloScadenze();
-    Logger.log('Trigger creato. Primo controllo: ' + JSON.stringify(primo));
+    Logger.log('Trigger creati. Primo controllo: ' + JSON.stringify(primo));
     if (primo && primo.error) return { error: 'Trigger creato, ma il primo controllo ha dato errore: ' + primo.error };
     return { ok: true, primo: primo, email: primo.email, calendar: primo.calendar };
   } catch (e) {
